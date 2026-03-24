@@ -438,6 +438,9 @@ export enum Colorspace {
 export enum ImageFormat {
   Jpeg = 'jpeg',
   Webp = 'webp',
+  Jxl = 'jxl',
+  // Stores as JXL on disk, but is served/transcoded as JPEG to clients
+  JxlJpeg = 'jxl-jpeg',
 }
 
 export enum RawExtractedFormat {

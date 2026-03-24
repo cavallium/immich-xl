@@ -46,6 +46,7 @@ const webSupportedImage = {
   '.jpg': ['image/jpeg'],
   '.png': ['image/png', 'image/apng'],
   '.webp': ['image/webp'],
+  '.jxl': ['image/jxl']
 };
 
 const image: Record<string, string[]> = {
@@ -54,7 +55,7 @@ const image: Record<string, string[]> = {
   '.bmp': ['image/bmp'],
   '.heic': ['image/heic'],
   '.heif': ['image/heif'],
-  '.hif': ['image/hif'],
+  '.hif': ['image/heif'],
   '.insp': ['image/jpeg'],
   '.jp2': ['image/jp2'],
   '.jpe': ['image/jpeg'],
@@ -68,7 +69,7 @@ const extensionOverrides: Record<string, string> = {
   'image/jpeg': '.jpg',
 };
 
-const profileExtensions = new Set(['.avif', '.dng', '.heic', '.heif', '.jpeg', '.jpg', '.png', '.webp', '.svg']);
+const profileExtensions = new Set(['.avif', '.dng', '.heic', '.heif', '.jpeg', '.jpg', '.png', '.webp', '.svg', '.jxl']);
 const profile: Record<string, string[]> = Object.fromEntries(
   Object.entries(image).filter(([key]) => profileExtensions.has(key)),
 );

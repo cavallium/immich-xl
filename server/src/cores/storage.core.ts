@@ -105,8 +105,15 @@ export class StorageCore {
     return StorageCore.getNestedPath(StorageFolder.Thumbnails, person.ownerId, `${person.id}.jpeg`);
   }
 
-  static getImagePath(asset: ThumbnailPathEntity, type: GeneratedImageType, format: 'jpeg' | 'webp') {
-    return StorageCore.getNestedPath(StorageFolder.Thumbnails, asset.ownerId, `${asset.id}-${type}.${format}`);
+  static getImagePath(asset: ThumbnailPathEntity, type: GeneratedImageType, format: ImageFormat) {
+    // Store JXL-JPEG format as .jxl on disk
+    const diskFormat = format === ImageFormat.JxlJpeg ? ImageFormat.Jxl : format;
+    return StorageCore.getNestedPath(StorageFolder.Thumbnails, asset.ownerId, `${asset.id}-${type}.${diskFormat}`);
+  }
+
+  // For the JXL-JPEG mode, we optionally keep a JPEG sidecar to serve clients without runtime transcoding
+  static getJpegSidecarPath(asset: ThumbnailPathEntity, type: GeneratedImageType) {
+    return StorageCore.getNestedPath(StorageFolder.Thumbnails, asset.ownerId, `${asset.id}-${type}.jpg`);
   }
 
   static getEncodedVideoPath(asset: ThumbnailPathEntity) {

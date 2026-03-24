@@ -30,6 +30,7 @@ import {
   JobName,
   Permission,
   StorageFolder,
+  ImageFormat,
 } from 'src/enum';
 import { AuthRequest } from 'src/middleware/auth.guard';
 import { BaseService } from 'src/services/base.service';
@@ -215,13 +216,14 @@ export class AssetMediaService extends BaseService {
 
     const asset = await this.findOrFail(id);
     const size = dto.size ?? AssetMediaSize.THUMBNAIL;
+    const { image } = await this.getConfig({ withCache: true });
 
     const { thumbnailFile, previewFile, fullsizeFile } = getAssetFiles(asset.files ?? []);
     let filepath = previewFile?.path;
     if (size === AssetMediaSize.THUMBNAIL && thumbnailFile) {
       filepath = thumbnailFile.path;
     } else if (size === AssetMediaSize.FULLSIZE) {
-      if (mimeTypes.isWebSupportedImage(asset.originalPath)) {
+      if (!image.fullsize.force && mimeTypes.isWebSupportedImage(asset.originalPath)) {
         // use original file for web supported images
         return { targetSize: 'original' };
       }
@@ -238,12 +240,23 @@ export class AssetMediaService extends BaseService {
     }
     let fileName = getFileNameWithoutExtension(asset.originalFileName);
     fileName += `_${size}`;
-    fileName += getFilenameExtension(filepath);
+
+    // pick the configured format for the requested size
+    const configuredFormat =
+      size === AssetMediaSize.THUMBNAIL
+        ? image.thumbnail.format
+        : size === AssetMediaSize.FULLSIZE
+        ? image.fullsize.format
+        : image.preview.format;
+
+    const isJxlJpeg = configuredFormat === ImageFormat.JxlJpeg;
+    const contentType = isJxlJpeg ? 'image/jpeg' : mimeTypes.lookup(filepath);
+    fileName += isJxlJpeg ? '.jpg' : getFilenameExtension(filepath);
 
     return new ImmichFileResponse({
       fileName,
       path: filepath,
-      contentType: mimeTypes.lookup(filepath),
+      contentType,
       cacheControl: CacheControl.PrivateWithCache,
     });
   }

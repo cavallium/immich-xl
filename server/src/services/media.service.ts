@@ -273,10 +273,11 @@ export class MediaService extends BaseService {
     // Handle embedded preview extraction for RAW files
     const extractEmbedded = image.extractEmbedded && mimeTypes.isRaw(asset.originalFileName);
     const extracted = extractEmbedded ? await this.extractImage(asset.originalPath, image.preview.size) : null;
+    const forceFullsize = image.fullsize.force || false;
     const generateFullsize =
       (image.fullsize.enabled || asset.exifInfo.projectionType == 'EQUIRECTANGULAR') &&
-      !mimeTypes.isWebSupportedImage(asset.originalPath);
-    const convertFullsize = generateFullsize && (!extracted || !mimeTypes.isWebSupportedImage(` .${extracted.format}`));
+      (forceFullsize || !mimeTypes.isWebSupportedImage(asset.originalPath));
+    const convertFullsize = generateFullsize && (forceFullsize || !extracted || !mimeTypes.isWebSupportedImage(` .${extracted.format}`));
 
     const { info, data, colorspace } = await this.decodeImage(
       extracted ? extracted.buffer : asset.originalPath,
@@ -301,8 +302,11 @@ export class MediaService extends BaseService {
       fullsizePath = StorageCore.getImagePath(asset, AssetPathType.FullSize, image.fullsize.format);
       const fullsizeOptions = { format: image.fullsize.format, quality: image.fullsize.quality, ...thumbnailOptions };
       promises.push(this.mediaRepository.generateThumbnail(data, fullsizeOptions, fullsizePath));
-    } else if (generateFullsize && extracted && extracted.format === RawExtractedFormat.Jpeg) {
-      fullsizePath = StorageCore.getImagePath(asset, AssetPathType.FullSize, extracted.format);
+    } else if (generateFullsize && extracted && [RawExtractedFormat.Jpeg, RawExtractedFormat.Jxl].includes(extracted.format)) {
+      // Map the raw extracted format to the ImageFormat enum expected by StorageCore.getImagePath
+      const extractedAsImageFormat: ImageFormat =
+        extracted.format === RawExtractedFormat.Jpeg ? ImageFormat.Jpeg : ImageFormat.Jxl;
+      fullsizePath = StorageCore.getImagePath(asset, AssetPathType.FullSize, extractedAsImageFormat);
       this.storageCore.ensureFolders(fullsizePath);
 
       // Write the buffer to disk with essential EXIF data

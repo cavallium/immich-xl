@@ -7,7 +7,7 @@ import { Writable } from 'node:stream';
 import sharp from 'sharp';
 import { ORIENTATION_TO_SHARP_ROTATION } from 'src/constants';
 import { Exif } from 'src/database';
-import { Colorspace, LogLevel, RawExtractedFormat } from 'src/enum';
+import { Colorspace, ImageFormat, LogLevel, RawExtractedFormat } from 'src/enum';
 import { LoggingRepository } from 'src/repositories/logging.repository';
 import {
   DecodeToBufferOptions,
@@ -143,11 +143,15 @@ export class MediaRepository {
   }
 
   async generateThumbnail(input: string | Buffer, options: GenerateThumbnailOptions, output: string): Promise<void> {
+    const targetFormat = options.format === ImageFormat.JxlJpeg ? ImageFormat.Jxl : options.format;
     await this.getImageDecodingPipeline(input, options)
-      .toFormat(options.format, {
+      .toFormat(targetFormat as any, {
         quality: options.quality,
         // this is default in libvips (except the threshold is 90), but we need to set it manually in sharp
-        chromaSubsampling: options.quality >= 80 ? '4:4:4' : '4:2:0',
+        chromaSubsampling:
+          targetFormat === ImageFormat.Jpeg || targetFormat === ImageFormat.Webp
+            ? options.quality >= 80 ? '4:4:4' : '4:2:0'
+            : undefined,
       })
       .toFile(output);
   }

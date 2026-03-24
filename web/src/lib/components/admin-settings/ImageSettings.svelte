@@ -33,6 +33,8 @@
             options={[
               { value: ImageFormat.Jpeg, text: 'JPEG' },
               { value: ImageFormat.Webp, text: 'WebP' },
+              { value: ImageFormat.Jxl, text: 'JPEG XL' },
+              { value: ImageFormat.JxlJpeg, text: 'JXL Lossless JPEG Transcoding' },
             ]}
             name="format"
             isEdited={configToEdit.image.thumbnail.format !== config.image.thumbnail.format}
@@ -78,6 +80,8 @@
             options={[
               { value: ImageFormat.Jpeg, text: 'JPEG' },
               { value: ImageFormat.Webp, text: 'WebP' },
+              { value: ImageFormat.Jxl, text: 'JPEG XL' },
+              { value: ImageFormat.JxlJpeg, text: 'JXL Lossless JPEG Transcoding' },
             ]}
             name="format"
             isEdited={configToEdit.image.preview.format !== config.image.preview.format}
@@ -133,6 +137,8 @@
             options={[
               { value: ImageFormat.Jpeg, text: 'JPEG' },
               { value: ImageFormat.Webp, text: 'WebP' },
+              { value: ImageFormat.Jxl, text: 'JPEG XL' },
+              { value: ImageFormat.JxlJpeg, text: 'JXL Lossless JPEG Transcoding' },
             ]}
             name="format"
             isEdited={configToEdit.image.fullsize.format !== config.image.fullsize.format}
@@ -147,6 +153,17 @@
             isEdited={configToEdit.image.fullsize.quality !== config.image.fullsize.quality}
             disabled={disabled || !configToEdit.image.fullsize.enabled}
           />
+
+          <div class="mt-3">
+            <SettingSwitch
+              title={$t('admin.image_fullsize_force_conversion')}
+              subtitle={$t('admin.image_fullsize_force_conversion_description')}
+              checked={configToEdit.image.fullsize.force}
+              onToggle={() => (configToEdit.image.fullsize.force = !configToEdit.image.fullsize.force)}
+              isEdited={configToEdit.image.fullsize.force !== config.image.fullsize.force}
+              disabled={disabled || !configToEdit.image.fullsize.enabled}
+            />
+          </div>
         </SettingAccordion>
 
         <div class="mt-4">

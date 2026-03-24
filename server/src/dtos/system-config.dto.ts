@@ -594,6 +594,9 @@ class SystemConfigGeneratedFullsizeImageDto {
   @Type(() => Number)
   @ApiProperty({ type: 'integer' })
   quality!: number;
+
+  @ValidateBoolean()
+  force!: boolean;
 }
 
 export class SystemConfigImageDto {

@@ -25,11 +25,15 @@ class ImageFormat {
 
   static const jpeg = ImageFormat._(r'jpeg');
   static const webp = ImageFormat._(r'webp');
+  static const jxl = ImageFormat._(r'jxl');
+  static const jxljpeg = ImageFormat._(r'jxl-jpeg');
 
   /// List of all possible values in this [enum][ImageFormat].
   static const values = <ImageFormat>[
     jpeg,
     webp,
+    jxl,
+    jxljpeg,
   ];
 
   static ImageFormat? fromJson(dynamic value) => ImageFormatTypeTransformer().decode(value);
@@ -70,6 +74,8 @@ class ImageFormatTypeTransformer {
       switch (data) {
         case r'jpeg': return ImageFormat.jpeg;
         case r'webp': return ImageFormat.webp;
+        case r'jxl': return ImageFormat.jxl;
+        case r'jxl-jpeg': return ImageFormat.jxljpeg;
         default:
           if (!allowNull) {
             throw ArgumentError('Unknown enum value to decode: $data');

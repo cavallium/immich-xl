@@ -36,6 +36,7 @@ export interface FullsizeImageOptions {
   format: ImageFormat;
   quality: number;
   enabled: boolean;
+  force: boolean;
 }
 
 export interface ImageOptions {

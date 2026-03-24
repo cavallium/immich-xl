@@ -1441,6 +1441,7 @@ export type SystemConfigGeneratedFullsizeImageDto = {
     enabled: boolean;
     format: ImageFormat;
     quality: number;
+    force: boolean;
 };
 export type SystemConfigGeneratedImageDto = {
     format: ImageFormat;
@@ -5625,7 +5626,9 @@ export enum Colorspace {
 }
 export enum ImageFormat {
     Jpeg = "jpeg",
-    Webp = "webp"
+    Webp = "webp",
+    Jxl = "jxl",
+    JxlJpeg = "jxl-jpeg"
 }
 export enum LogLevel {
     Verbose = "verbose",

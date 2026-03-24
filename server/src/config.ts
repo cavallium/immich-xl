@@ -330,6 +330,7 @@ export const defaults = Object.freeze<SystemConfig>({
       enabled: false,
       format: ImageFormat.Jpeg,
       quality: 80,
+      force: false,
     },
   },
   newVersionCheck: {
