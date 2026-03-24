@@ -16,6 +16,19 @@ COPY ./server/package* ./server/pnpm* /tmp/create-dep-cache/server/
 COPY ./open-api/typescript-sdk/package* ./open-api/typescript-sdk/pnpm* /tmp/create-dep-cache/open-api/typescript-sdk/
 WORKDIR /tmp/create-dep-cache
 RUN pnpm fetch && rm -rf /tmp/create-dep-cache && chmod -R o+rw /buildcache
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libjxl-tools wget ca-certificates && \
+    cd /tmp && \
+    wget https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz && \
+    tar xf ffmpeg-master-latest-linux64-gpl.tar.xz && \
+    mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    mv ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe && \
+    chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    rm -rf ffmpeg-master-latest-linux64-gpl ffmpeg*.tar.xz && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /usr/src/app
 
 ENV PATH="${PATH}:/usr/src/app/server/bin:/usr/src/app/web/bin" \
