@@ -76,7 +76,7 @@ export const sendFile = async (
         const usedDjxl = await new Promise<boolean>((resolve) => {
           let resolved = false;
           // Try djxl first for lossless JPEG reconstruction
-          const djxl = spawn('djxl', ['--jpeg', file.path, '-']);
+          const djxl = spawn('djxl', [file.path, '-', '--output_format', 'jpeg']);
           djxl.on('error', (err) => {
             // djxl not found or failed to start
             logger.debug?.(`djxl not available or failed to start: ${err?.message || err}` as any);
