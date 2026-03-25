@@ -13,7 +13,7 @@
   import { getAssetOriginalUrl, getAssetPlaybackUrl, getAssetThumbnailUrl } from '$lib/utils';
   import { AssetMediaSize } from '@immich/sdk';
   import { LoadingSpinner } from '@immich/ui';
-  import { SlideshowNavigation, slideshowNavigation } from '$lib/stores/slideshow.store';
+  import { SlideshowNavigation, slideshowStore } from '$lib/stores/slideshow.store';
   import { onDestroy, onMount } from 'svelte';
   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
   import { fade } from 'svelte/transition';
@@ -41,6 +41,8 @@
     onVideoStarted = () => {},
     onClose = () => {},
   }: Props = $props();
+
+  const { slideshowNavigation } = slideshowStore;
 
   let videoPlayer: HTMLVideoElement | undefined = $state();
   let isLoading = $state(true);

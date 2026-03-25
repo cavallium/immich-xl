@@ -12,7 +12,7 @@
   import { ocrManager } from '$lib/stores/ocr.svelte';
   import { boundingBoxesArray } from '$lib/stores/people.store';
   import { alwaysLoadOriginalFile } from '$lib/stores/preferences.store';
-  import { SlideshowLook, SlideshowNavigation, SlideshowState, slideshowLookCssMapping, slideshowNavigation, slideshowStore } from '$lib/stores/slideshow.store';
+  import { SlideshowLook, SlideshowNavigation, SlideshowState, slideshowLookCssMapping, slideshowStore } from '$lib/stores/slideshow.store';
   import { photoZoomState } from '$lib/stores/zoom-image.store';
   import { getAssetOriginalUrl, getAssetThumbnailUrl, handlePromiseError } from '$lib/utils';
   import { canCopyImageToClipboard, copyImageToClipboard, isWebCompatibleImage } from '$lib/utils/asset-utils';
@@ -53,7 +53,7 @@
     zoomToggle = $bindable(),
   }: Props = $props();
 
-  const { slideshowState, slideshowLook } = slideshowStore;
+  const { slideshowState, slideshowLook, slideshowNavigation } = slideshowStore;
 
   let assetFileUrl: string = $state('');
   let imageLoaded: boolean = $state(false);
