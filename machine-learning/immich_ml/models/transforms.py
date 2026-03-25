@@ -8,6 +8,11 @@ import orjson
 from numpy.typing import NDArray
 from PIL import Image
 
+try:
+    import pillow_jxl  # noqa: F401 - registers JPEG XL plugin for PIL
+except ImportError:
+    pass
+
 _PIL_RESAMPLING_METHODS = {resampling.name.lower(): resampling for resampling in Image.Resampling}
 _PUNCTUATION_TRANS = str.maketrans("", "", string.punctuation)
 
