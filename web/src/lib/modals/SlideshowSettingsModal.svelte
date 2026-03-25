@@ -11,6 +11,7 @@
     mdiFitToScreenOutline,
     mdiPanorama,
     mdiShuffle,
+    mdiFireCircle,
   } from '@mdi/js';
   import { t } from 'svelte-i18n';
   import SettingDropdown from '../components/shared-components/settings/setting-dropdown.svelte';
@@ -23,6 +24,11 @@
     slideshowLook,
     slideshowTransition,
     slideshowAutoplay,
+    forYouOnlyVideos,
+    forYouOnlyFavorites,
+    forYouMinRating,
+    forYouDiscoveryRate,
+    forYouAvoidRecent,
   } = slideshowStore;
 
   interface Props {
@@ -38,11 +44,18 @@
   let tempSlideshowLook = $state($slideshowLook);
   let tempSlideshowTransition = $state($slideshowTransition);
   let tempSlideshowAutoplay = $state($slideshowAutoplay);
+  let tempForYouOnlyVideos = $state($forYouOnlyVideos);
+  let tempForYouOnlyFavorites = $state($forYouOnlyFavorites);
+  let tempForYouMinRating = $state($forYouMinRating);
+  let tempForYouDiscoveryRate = $state($forYouDiscoveryRate);
+  let tempForYouAvoidRecent = $state($forYouAvoidRecent);
 
   const navigationOptions: Record<SlideshowNavigation, RenderedOption> = {
     [SlideshowNavigation.Shuffle]: { icon: mdiShuffle, title: $t('shuffle') },
     [SlideshowNavigation.AscendingOrder]: { icon: mdiArrowUpThin, title: $t('backward') },
     [SlideshowNavigation.DescendingOrder]: { icon: mdiArrowDownThin, title: $t('forward') },
+    [SlideshowNavigation.RandomLibrary]: { icon: mdiShuffle, title: 'Library Random' },
+    [SlideshowNavigation.ForYou]: { icon: mdiFireCircle, title: 'For You (Algorithm)' },
   };
 
   const lookOptions: Record<SlideshowLook, RenderedOption> = {
@@ -69,8 +82,16 @@
     $slideshowLook = tempSlideshowLook;
     $slideshowTransition = tempSlideshowTransition;
     $slideshowAutoplay = tempSlideshowAutoplay;
+    $forYouOnlyVideos = tempForYouOnlyVideos;
+    $forYouOnlyFavorites = tempForYouOnlyFavorites;
+    $forYouMinRating = tempForYouMinRating;
+    $forYouDiscoveryRate = tempForYouDiscoveryRate;
+    $forYouAvoidRecent = tempForYouAvoidRecent;
     onClose();
   };
+
+  // Check if ForYou mode is selected to show additional options
+  let isForYouMode = $derived(tempSlideshowNavigation === SlideshowNavigation.ForYou);
 </script>
 
 <Modal size="small" title={$t('slideshow_settings')} onClose={() => onClose()}>
@@ -100,8 +121,33 @@
         label={$t('duration')}
         description={$t('admin.slideshow_duration_description')}
         min={1}
+        max={600}
         bind:value={tempSlideshowDelay}
       />
+      {#if isForYouMode}
+        <div class="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
+          <p class="text-sm font-medium mb-3">For You Algorithm Settings</p>
+          <SettingSwitch title="Videos only" bind:checked={tempForYouOnlyVideos} />
+          <SettingSwitch title="Favorites only" bind:checked={tempForYouOnlyFavorites} />
+          <SettingSwitch title="Avoid recently viewed" bind:checked={tempForYouAvoidRecent} />
+          <SettingInputField
+            inputType={SettingInputFieldType.NUMBER}
+            label="Minimum rating"
+            description="Only show content with this rating or higher (0 = no filter)"
+            min={0}
+            max={5}
+            bind:value={tempForYouMinRating}
+          />
+          <SettingInputField
+            inputType={SettingInputFieldType.NUMBER}
+            label="Discovery rate (%)"
+            description="Chance to show new random content instead of recommendations"
+            min={0}
+            max={100}
+            bind:value={tempForYouDiscoveryRate}
+          />
+        </div>
+      {/if}
     </div>
   </ModalBody>
   <ModalFooter>

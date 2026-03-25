@@ -1,9 +1,14 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import { goto } from '$app/navigation';
   import BottomInfo from '$lib/components/shared-components/side-bar/bottom-info.svelte';
   import RecentAlbums from '$lib/components/shared-components/side-bar/recent-albums.svelte';
   import Sidebar from '$lib/components/sidebar/sidebar.svelte';
+  import { AppRoute } from '$lib/constants';
   import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte';
+  import { assetViewingStore } from '$lib/stores/asset-viewing.store';
+  import { SlideshowNavigation, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
+  import { getRandom } from '@immich/sdk';
   import { recentAlbumsDropdown } from '$lib/stores/preferences.store';
   import { preferences } from '$lib/stores/user.store';
   import {
@@ -13,6 +18,7 @@
     mdiAccountOutline,
     mdiArchiveArrowDown,
     mdiArchiveArrowDownOutline,
+    mdiFireCircle,
     mdiFolderOutline,
     mdiHeart,
     mdiHeartOutline,
@@ -44,6 +50,18 @@
   let isTrashSelected: boolean = $state(false);
   let isUtilitiesSelected: boolean = $state(false);
   let isLockedFolderSelected: boolean = $state(false);
+
+  async function startForYou() {
+    const randomAssets = await getRandom({ count: 1 });
+    if (randomAssets.length > 0) {
+      const asset = randomAssets[0];
+      slideshowStore.slideshowNavigation.set(SlideshowNavigation.ForYou);
+      slideshowStore.slideshowState.set(SlideshowState.PlaySlideshow);
+      assetViewingStore.setAsset(asset);
+      assetViewingStore.showAssetViewer(true);
+      await goto(`${resolve(AppRoute.PHOTOS)}/${asset.id}`);
+    }
+  }
 </script>
 
 <Sidebar ariaLabel={$t('primary')}>
@@ -53,6 +71,13 @@
     bind:isSelected={isPhotosSelected}
     icon={isPhotosSelected ? mdiImageMultiple : mdiImageMultipleOutline}
   ></SideBarLink>
+
+  <SideBarLink
+    title="For You"
+    href={resolve(AppRoute.PHOTOS)}
+    icon={mdiFireCircle}
+    onclick={() => startForYou()}
+  />
 
   {#if featureFlagsManager.value.search}
     <SideBarLink title={$t('explore')} href={resolve('/(user)/explore')} icon={mdiMagnify} />

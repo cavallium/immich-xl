@@ -55,6 +55,7 @@
     mdiMagnifyMinusOutline,
     mdiMagnifyPlusOutline,
     mdiPresentationPlay,
+    mdiShimmer,
     mdiUpload,
     mdiVideoOutline,
   } from '@mdi/js';
@@ -75,6 +76,7 @@
     onAction: OnAction;
     onRunJob: (name: AssetJobName) => void;
     onPlaySlideshow: () => void;
+    onPlayForYou: () => void;
     onShowDetail: () => void;
     // export let showEditorHandler: () => void;
     onClose: () => void;
@@ -97,6 +99,7 @@
     onAction,
     onRunJob,
     onPlaySlideshow,
+    onPlayForYou,
     onShowDetail,
     onClose,
     motionPhoto,
@@ -175,6 +178,17 @@
 
     {#if showDetailButton}
       <ShowDetailAction {onShowDetail} />
+    {/if}
+
+    {#if !sharedLink && $user}
+      <IconButton
+        color="secondary"
+        variant="ghost"
+        shape="round"
+        icon={mdiShimmer}
+        aria-label={$t('for_you')}
+        onclick={onPlayForYou}
+      />
     {/if}
 
     {#if isOwner}

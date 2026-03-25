@@ -5,7 +5,7 @@
   import SlideshowSettingsModal from '$lib/modals/SlideshowSettingsModal.svelte';
   import { SlideshowNavigation, slideshowStore } from '$lib/stores/slideshow.store';
   import { IconButton, modalManager } from '@immich/ui';
-  import { mdiChevronLeft, mdiChevronRight, mdiClose, mdiCog, mdiFullscreen, mdiPause, mdiPlay } from '@mdi/js';
+  import { mdiChevronLeft, mdiChevronRight, mdiClose, mdiCog, mdiFireCircle, mdiFullscreen, mdiPause, mdiPlay } from '@mdi/js';
   import { onDestroy, onMount } from 'svelte';
   import { useSwipe } from 'svelte-gestures';
   import { t } from 'svelte-i18n';
@@ -29,6 +29,16 @@
 
   const { restartProgress, stopProgress, slideshowDelay, showProgressBar, slideshowNavigation, slideshowAutoplay } =
     slideshowStore;
+
+  const isForYouMode = $derived($slideshowNavigation === SlideshowNavigation.ForYou);
+
+  const toggleForYouMode = () => {
+    if (isForYouMode) {
+      $slideshowNavigation = SlideshowNavigation.Shuffle;
+    } else {
+      $slideshowNavigation = SlideshowNavigation.ForYou;
+    }
+  };
 
   let progressBarStatus: ProgressBarStatus | undefined = $state();
   let progressBar = $state<ReturnType<typeof ProgressBar>>();
@@ -197,6 +207,15 @@
       icon={mdiChevronRight}
       onclick={onNext}
       aria-label={$t('next')}
+    />
+    <IconButton
+      variant={isForYouMode ? 'filled' : 'ghost'}
+      shape="round"
+      color={isForYouMode ? 'primary' : 'secondary'}
+      icon={mdiFireCircle}
+      onclick={toggleForYouMode}
+      aria-label={isForYouMode ? 'Disable For You mode' : 'Enable For You mode'}
+      title={isForYouMode ? 'For You: ON' : 'For You: OFF'}
     />
     <IconButton
       variant="ghost"

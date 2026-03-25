@@ -14,6 +14,7 @@
     preloadData?: boolean;
     dropDownContent?: Snippet;
     dropdownOpen?: boolean;
+    onclick?: (e: MouseEvent) => void;
   }
 
   let {
@@ -25,6 +26,7 @@
     preloadData = true,
     dropDownContent: hasDropdown,
     dropdownOpen = $bindable(false),
+    onclick,
   }: Props = $props();
 
   $effect(() => {
@@ -55,6 +57,7 @@
   <a
     tabindex="0"
     {href}
+    onclick={onclick ? (e) => { e.preventDefault(); onclick(e); } : undefined}
     data-sveltekit-preload-data={preloadData ? 'hover' : 'off'}
     draggable="false"
     aria-current={isSelected ? 'page' : undefined}

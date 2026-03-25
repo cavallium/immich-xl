@@ -11,6 +11,8 @@ export enum SlideshowNavigation {
   Shuffle = 'shuffle',
   AscendingOrder = 'ascending-order',
   DescendingOrder = 'descending-order',
+  RandomLibrary = 'random-library',
+  ForYou = 'for-you',
 }
 
 export enum SlideshowLook {
@@ -37,9 +39,14 @@ function createSlideshowStore() {
   const slideshowState = writable<SlideshowState>(SlideshowState.None);
 
   const showProgressBar = persisted<boolean>('slideshow-show-progressbar', true);
-  const slideshowDelay = persisted<number>('slideshow-delay', 5, {});
+  const slideshowDelay = persisted<number>('slideshow-delay', 30, {});
   const slideshowTransition = persisted<boolean>('slideshow-transition', true);
   const slideshowAutoplay = persisted<boolean>('slideshow-autoplay', true, {});
+  const forYouOnlyVideos = persisted<boolean>('slideshow-foryou-only-videos', false, {});
+  const forYouOnlyFavorites = persisted<boolean>('slideshow-foryou-only-favorites', false, {});
+  const forYouMinRating = persisted<number>('slideshow-foryou-min-rating', 0, {}); // 0 = no filter, 1-5 = minimum rating
+  const forYouDiscoveryRate = persisted<number>('slideshow-foryou-discovery-rate', 10, {}); // % chance of discovery mode (0-100)
+  const forYouAvoidRecent = persisted<boolean>('slideshow-foryou-avoid-recent', true, {}); // Avoid showing recently viewed
 
   return {
     restartProgress: {
@@ -71,6 +78,11 @@ function createSlideshowStore() {
     showProgressBar,
     slideshowTransition,
     slideshowAutoplay,
+    forYouOnlyVideos,
+    forYouOnlyFavorites,
+    forYouMinRating,
+    forYouDiscoveryRate,
+    forYouAvoidRecent,
   };
 }
 

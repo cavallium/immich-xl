@@ -10,15 +10,17 @@
   import { AppRoute, AssetAction, ProjectionType } from '$lib/constants';
   import { activityManager } from '$lib/managers/activity-manager.svelte';
   import { authManager } from '$lib/managers/auth-manager.svelte';
+  import { featureFlagsManager } from '$lib/managers/feature-flags-manager.svelte.ts';
   import type { TimelineAsset } from '$lib/managers/timeline-manager/types';
   import { closeEditorCofirm } from '$lib/stores/asset-editor.store';
   import { assetViewingStore } from '$lib/stores/asset-viewing.store';
   import { ocrManager } from '$lib/stores/ocr.svelte';
   import { alwaysLoadOriginalVideo, isShowDetail } from '$lib/stores/preferences.store';
   import { SlideshowNavigation, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
+  import { forYouEngine, getForYouDebugLog, clearForYouDebugLog, type ForYouLogEntry, type ForYouLogLevel } from '$lib/stores/for-you-engine';
   import { user } from '$lib/stores/user.store';
   import { websocketEvents } from '$lib/stores/websocket';
-  import { getAssetJobMessage, getSharedLink, handlePromiseError } from '$lib/utils';
+  import { getAssetJobMessage, getAssetThumbnailUrl, getSharedLink, handlePromiseError } from '$lib/utils';
   import { handleError } from '$lib/utils/handle-error';
   import { SlideshowHistory } from '$lib/utils/slideshow-history';
   import { toTimelineAsset } from '$lib/utils/timeline-util';
@@ -27,8 +29,11 @@
     AssetTypeEnum,
     getAllAlbums,
     getAssetInfo,
+    getRandom,
     getStack,
     runAssetJobs,
+    searchRandom,
+    searchSmart,
     type AlbumResponseDto,
     type AssetResponseDto,
     type PersonResponseDto,
@@ -88,14 +93,46 @@
     copyImage = $bindable(),
   }: Props = $props();
 
-  const { setAssetId } = assetViewingStore;
+  const { setAssetId, setAsset } = assetViewingStore;
   const {
     restartProgress: restartSlideshowProgress,
     stopProgress: stopSlideshowProgress,
     slideshowNavigation,
     slideshowState,
     slideshowTransition,
+    forYouOnlyVideos,
+    forYouOnlyFavorites,
+    forYouMinRating,
+    forYouDiscoveryRate,
+    forYouAvoidRecent,
   } = slideshowStore;
+
+  // For You algorithm state — only need to track when the current asset started being viewed;
+  // all engagement data is persisted in the ForYouEngine (localStorage).
+  let currentAssetStartTime: number = $state(0);
+  // Prefetch queue: pre-fetched next assets for instant ForYou transitions.
+  let forYouPrefetchQueue: AssetResponseDto[] = [];
+  // Whether a prefetch is currently in-flight (avoid duplicate fetches).
+  let forYouPrefetching = false;
+  // Debug overlay state
+  let expandedThumbId = $state<string | null>(null);
+  let showForYouDebug = $state(false);
+  let debugLogLevel: ForYouLogLevel = $state('debug');
+  const LOG_LEVELS: ForYouLogLevel[] = ['debug', 'info', 'warn', 'error'];
+  let forYouDebugState: ReturnType<typeof forYouEngine.getDebugState> | null = $state(null);
+  let forYouDebugLogs: ForYouLogEntry[] = $state([]);
+  let forYouLastStrategy = $state('');
+
+  function fyLog(msg: string, level: ForYouLogLevel = 'debug'): void {
+    const entry: ForYouLogEntry = { timestamp: Date.now(), message: msg, level };
+    getForYouDebugLog().push(entry);
+    forYouDebugLogs = getForYouDebugLog().slice();
+  }
+
+  function refreshDebugOverlay(): void {
+    forYouDebugState = forYouEngine.getDebugState();
+    forYouDebugLogs = getForYouDebugLog().slice();
+  }
   const stackThumbnailSize = 60;
   const stackSelectedThumbnailSize = 65;
 
@@ -166,14 +203,23 @@
       if (value === SlideshowState.PlaySlideshow) {
         slideshowHistory.reset();
         slideshowHistory.queue(toTimelineAsset(asset));
+        // Seed ForYou engine with current asset and start tracking watch time
+        forYouEngine.addRecentlyShown(asset.id);
+        currentAssetStartTime = Date.now();
         handlePromiseError(handlePlaySlideshow());
       } else if (value === SlideshowState.StopSlideshow) {
+        // Record watch time for the last viewed asset before stopping
+        recordWatchTime(asset);
         handlePromiseError(handleStopSlideshow());
       }
     });
 
     shuffleSlideshowUnsubscribe = slideshowNavigation.subscribe((value) => {
-      if (value === SlideshowNavigation.Shuffle) {
+      if (
+        value === SlideshowNavigation.Shuffle ||
+        value === SlideshowNavigation.RandomLibrary ||
+        value === SlideshowNavigation.ForYou
+      ) {
         slideshowHistory.reset();
         slideshowHistory.queue(toTimelineAsset(asset));
       }
@@ -234,6 +280,426 @@
     });
   };
 
+  const getLibraryRandomAsset = async (): Promise<AssetResponseDto | null> => {
+    try {
+      const assets = await getRandom({ count: 1 });
+      if (!assets || assets.length === 0) {
+        toastManager.info('No assets available for random slideshow.');
+        return null;
+      }
+      return assets[0];
+    } catch (error) {
+      console.error('Failed to fetch random asset:', error);
+      toastManager.error('Failed to fetch random asset.');
+      return null;
+    }
+  };
+
+  // ── For You algorithm ────────────────────────────────────────────────────
+  // TikTok-like personalised feed powered by the persistent ForYouEngine.
+  //
+  // Strategy selection (per request):
+  //   1. Roll against discoveryRate → pure random (exploration).
+  //   2. Otherwise, if CLIP is available and we have engagement data →
+  //      ML similarity search using the engine's weighted anchor selection.
+  //   3. Otherwise, if we have person data → person-based random search.
+  //   4. Fallback → pure random (cold-start / no ML).
+  //
+  // Within each strategy we apply the user's filters (video-only, favorites,
+  // min-rating) and avoid recently shown assets when configured.
+
+  /** Build common filter params from user settings. */
+  const buildFilterParams = () => {
+    const params: Record<string, unknown> = {};
+    if ($forYouOnlyVideos) params.type = AssetTypeEnum.Video;
+    if ($forYouOnlyFavorites) params.isFavorite = true;
+    if ($forYouMinRating > 0) params.rating = $forYouMinRating;
+    return params;
+  };
+
+  /** Pick the best candidate from a list, filtering recently-shown and negatively-scored assets,
+   *  then re-ranking by person affinity and engagement signals. */
+  const pickCandidate = (assets: AssetResponseDto[], negativeIds?: Set<string>): AssetResponseDto | null => {
+    if (!assets || assets.length === 0) {
+      fyLog('[pick] no candidates to pick from', 'warn');
+      return null;
+    }
+    let pool = assets;
+    // Filter out negatively-scored assets (content the user dislikes)
+    if (negativeIds && negativeIds.size > 0) {
+      const before = pool.length;
+      const filtered = pool.filter((a) => !negativeIds.has(a.id));
+      if (filtered.length > 0) pool = filtered;
+      fyLog(`[pick] negative content filter: ${before} → ${pool.length} candidates`);
+    }
+    if ($forYouAvoidRecent) {
+      const before = pool.length;
+      const fresh = pool.filter((a) => !forYouEngine.isRecentlyShown(a.id));
+      if (fresh.length > 0) pool = fresh;
+      fyLog(`[pick] recently-shown filter: ${before} → ${pool.length} candidates`);
+    }
+    // Re-rank candidates using person affinity, negative history, and freshness.
+    // The CLIP search order provides a base relevance rank (index-based),
+    // which we combine with the engine's candidate score.
+    const scored = pool.map((a, idx) => {
+      const personIds = (a.people ?? []).filter((p) => p.id).map((p) => p.id);
+      const candidateScore = forYouEngine.scoreCandidateAsset(a.id, personIds);
+      // Base rank score: earlier CLIP results get a strong exponential bonus.
+      // CLIP similarity drops off quickly, so we use exponential decay to
+      // heavily favour the top results and suppress the irrelevant tail.
+      const clipRankBonus = 5 * Math.exp(-3 * idx / pool.length);
+      return { asset: a, candidateScore, clipRankBonus, finalScore: candidateScore + clipRankBonus };
+    });
+    scored.sort((a, b) => b.finalScore - a.finalScore);
+    // Weighted random pick from top 5 to add variety while preferring best matches
+    const topN = scored.slice(0, Math.min(5, scored.length));
+    fyLog(`[pick] top-${topN.length} candidates: ${topN.map((s) => `${s.asset.id.slice(0, 8)}…(clip=${s.clipRankBonus.toFixed(2)} eng=${s.candidateScore.toFixed(2)} total=${s.finalScore.toFixed(2)})`).join(', ')}`);
+    const minScore = Math.min(...topN.map((s) => s.finalScore));
+    const weights = topN.map((s) => Math.max(0.1, s.finalScore - minScore + 1));
+    const totalW = weights.reduce((s, w) => s + w, 0);
+    let r = Math.random() * totalW;
+    for (let i = 0; i < weights.length; i++) {
+      r -= weights[i];
+      if (r <= 0) {
+        fyLog(`[pick] selected: ${topN[i].asset.id.slice(0, 8)}… (rank #${i}, weight=${(weights[i] / totalW * 100).toFixed(1)}%)`);
+        return topN[i].asset;
+      }
+    }
+    fyLog(`[pick] selected last: ${topN[topN.length - 1].asset.id.slice(0, 8)}…`);
+    return topN[topN.length - 1].asset;
+  };
+
+  const getForYouAsset = async (): Promise<AssetResponseDto | null> => {
+    try {
+      fyLog('════════════════════════════════════════════════', 'info');
+      fyLog(`[fetch] starting asset selection (views=${forYouEngine.getViewCount()}, session=${forYouEngine.getSessionSize()})`);
+      const userDiscoveryRate = $forYouDiscoveryRate / 100;
+      const effectiveDiscoveryRate = forYouEngine.getAdaptiveDiscoveryRate(userDiscoveryRate);
+      const roll = Math.random();
+      const burst = forYouEngine.hasInterestBurst();
+      // During an interest burst, suppress discovery to keep riding the wave
+      const useDiscovery = burst
+        ? roll < effectiveDiscoveryRate * 0.3
+        : roll < effectiveDiscoveryRate;
+      forYouLastStrategy = useDiscovery ? 'DISCOVERY' : 'RECOMMENDATION';
+      fyLog(`[fetch] discovery: roll=${(roll * 100).toFixed(1)}% threshold=${(burst ? effectiveDiscoveryRate * 0.3 * 100 : effectiveDiscoveryRate * 100).toFixed(1)}% → ${forYouLastStrategy} (burst=${burst})`);
+
+      let isSmartSearchEnabled = false;
+      try {
+        let features = featureFlagsManager.value;
+        if (!features) {
+          fyLog('[config] featureFlagsManager.value is null, calling init()');
+          await featureFlagsManager.init();
+          features = featureFlagsManager.value;
+        }
+        fyLog(`[config] smartSearch=${features?.smartSearch}`);
+        if (features?.smartSearch) {
+          isSmartSearchEnabled = true;
+        }
+      } catch (error) {
+        fyLog(`[config] ERROR loading server features: ${error}`, 'error');
+        console.warn('ForYou: failed to load server features, skipping CLIP strategy', error);
+      }
+      fyLog(`[gate] isSmartSearchEnabled=${isSmartSearchEnabled} hasEngagement=${forYouEngine.hasEngagementData()} hasPersonData=${forYouEngine.hasPersonData()}`);
+
+      let selectedAsset: AssetResponseDto | null = null;
+
+      // ── Build content-based negative exclusion set ──────────────────────
+      // In a large library you almost never see the same asset twice, so
+      // filtering by exact asset ID is useless. Instead, use negative anchors
+      // as CLIP queries to find assets *similar* to disliked content and
+      // exclude those from recommendations (content-based filtering).
+      const negativeAnchorIds = forYouEngine.pickNegativeAnchorAssetIds();
+      let negativeContentIds = new Set<string>();
+      if (isSmartSearchEnabled && negativeAnchorIds.length > 0) {
+        fyLog(`building negative content set from ${negativeAnchorIds.length} negative anchors`);
+        const negSearchPromises = negativeAnchorIds.map(async (anchorId) => {
+          try {
+            const response = await searchSmart({
+              smartSearchDto: {
+                queryAssetId: anchorId,
+                size: 15,
+                ...buildFilterParams(),
+              } as Parameters<typeof searchSmart>[0]['smartSearchDto'],
+            });
+            return response.assets.items.map((a) => a.id);
+          } catch {
+            return [];
+          }
+        });
+        const negResults = await Promise.all(negSearchPromises);
+        negativeContentIds = new Set(negResults.flat());
+        // Also add the negative anchor IDs themselves
+        for (const id of negativeAnchorIds) negativeContentIds.add(id);
+        fyLog(`negative content exclusion set has ${negativeContentIds.size} assets`);
+      }
+
+      // ── Strategy 1: Discovery (random exploration) ──────────────────────
+      if (useDiscovery) {
+        fyLog(`discovery roll (${(roll * 100).toFixed(1)}% < ${(effectiveDiscoveryRate * 100).toFixed(1)}%, burst=${forYouEngine.hasInterestBurst()})`);
+        selectedAsset = await fetchRandomAsset(negativeContentIds);
+      }
+
+      // ── Strategy 2: Multi-anchor CLIP similarity search ─────────────────
+      // Query multiple anchors in parallel and merge results for better coverage.
+      // During an interest burst, use fewer anchors (more focused) for tighter results.
+      if (!selectedAsset && !useDiscovery && isSmartSearchEnabled && forYouEngine.hasEngagementData()) {
+        const anchorCount = forYouEngine.hasInterestBurst() ? 2 : undefined;
+        const anchors = forYouEngine.pickQueryAnchorAssetIds(anchorCount);
+        forYouLastStrategy = `CLIP (${anchors.length} anchors)`;
+        fyLog(`[CLIP] strategy with ${anchors.length} anchors, ${negativeContentIds.size} negative content exclusions`);
+        if (anchors.length > 0) {
+          // Allocate search slots proportional to anchor score so higher-scored
+          // anchors contribute more candidates. Keep budget small (~50) because
+          // CLIP results are sorted by similarity and the tail becomes random.
+          const totalScore = anchors.reduce((s, a) => s + a.score, 0);
+          const TOTAL_BUDGET = 50;
+          const MIN_PER_ANCHOR = 5;
+          const anchorSizes = anchors.map((a) => {
+            const proportional = Math.round((a.score / totalScore) * TOTAL_BUDGET);
+            return Math.max(MIN_PER_ANCHOR, proportional);
+          });
+          fyLog(`[CLIP] budget allocation: ${anchors.map((a, i) => `${a.id.slice(0, 8)}…→${anchorSizes[i]} slots`).join(', ')} (total=${anchorSizes.reduce((s, n) => s + n, 0)})`);
+
+          const allCandidates: AssetResponseDto[] = [];
+          const searchPromises = anchors.map(async (anchor, idx) => {
+            try {
+              const response = await searchSmart({
+                smartSearchDto: {
+                  queryAssetId: anchor.id,
+                  size: anchorSizes[idx],
+                  withPeople: true,
+                  ...buildFilterParams(),
+                } as Parameters<typeof searchSmart>[0]['smartSearchDto'],
+              });
+              return response.assets.items;
+            } catch (error) {
+              console.warn(`ForYou: CLIP search failed for anchor ${anchor.id}`, error);
+              return [];
+            }
+          });
+          const results = await Promise.all(searchPromises);
+          // Merge results via round-robin across anchors so each anchor
+          // contributes equally to the top of the candidate list.
+          const seen = new Set<string>(anchors.map((a) => a.id)); // exclude anchor assets themselves
+          const maxLen = Math.max(...results.map((r) => r.length));
+          for (let i = 0; i < maxLen; i++) {
+            for (const items of results) {
+              if (i < items.length && !seen.has(items[i].id)) {
+                seen.add(items[i].id);
+                allCandidates.push(items[i]);
+              }
+            }
+          }
+          fyLog(`[CLIP] merged ${allCandidates.length} unique candidates from ${results.length} anchor queries`);
+          selectedAsset = pickCandidate(allCandidates, negativeContentIds);
+        }
+      }
+
+      // ── Strategy 3: Person-based recommendation (low priority fallback) ──
+      // Person-based is only a fallback — content/preference via CLIP are primary.
+      if (!selectedAsset && !useDiscovery && forYouEngine.hasPersonData()) {
+        forYouLastStrategy = 'PERSON';
+        fyLog('[person] falling through to person-based strategy', 'warn');
+        const personIds = forYouEngine.pickPersonIds();
+        if (personIds.length > 0) {
+          try {
+            const assets = await searchRandom({
+              randomSearchDto: {
+                personIds,
+                size: 5,
+                withPeople: true,
+                ...buildFilterParams(),
+              } as Parameters<typeof searchRandom>[0]['randomSearchDto'],
+            });
+            selectedAsset = pickCandidate(assets, negativeContentIds);
+          } catch (error) {
+            console.warn('ForYou: person-based search failed', error);
+          }
+        }
+      }
+
+      // ── Strategy 4: Fallback random ─────────────────────────────────────
+      if (!selectedAsset) {
+        forYouLastStrategy = 'RANDOM (fallback)';
+        fyLog('[fallback] all strategies exhausted, using random', 'warn');
+        selectedAsset = await fetchRandomAsset(negativeContentIds);
+      }
+
+      if (!selectedAsset) {
+        toastManager.info('No assets available for For You feed.');
+        return null;
+      }
+
+      fyLog(`[fetch] ✓ selected asset: ${selectedAsset.id.slice(0, 8)}… (type=${selectedAsset.type})`, 'info');
+      refreshDebugOverlay();
+
+      // Mark as recently shown so we don't repeat it soon
+      forYouEngine.addRecentlyShown(selectedAsset.id);
+
+      // Trigger background prefetch of the next asset for instant transition
+      triggerForYouPrefetch();
+
+      return selectedAsset;
+    } catch (error) {
+      console.error('Failed to fetch For You asset:', error);
+      toastManager.error('Failed to fetch For You content.');
+      return null;
+    }
+  };
+
+  /** Try to return a prefetched asset, or fall back to fetching on demand. */
+  const getForYouAssetFast = async (): Promise<AssetResponseDto | null> => {
+    if (forYouPrefetchQueue.length > 0) {
+      const prefetched = forYouPrefetchQueue.shift()!;
+      // Verify it's still fresh (not recently shown by another path)
+      if (!forYouEngine.isRecentlyShown(prefetched.id) || !$forYouAvoidRecent) {
+        fyLog(`[prefetch] serving prefetched asset ${prefetched.id.slice(0, 8)}… (queue=${forYouPrefetchQueue.length} remaining)`);
+        forYouEngine.addRecentlyShown(prefetched.id);
+        triggerForYouPrefetch();
+        return prefetched;
+      }
+      fyLog(`[prefetch] prefetched asset ${prefetched.id.slice(0, 8)}… was already shown, falling back to fresh fetch`);
+    }
+    return getForYouAsset();
+  };
+
+  /** Background prefetch: fetch the next ForYou asset ahead of time. */
+  const triggerForYouPrefetch = () => {
+    if (forYouPrefetching || forYouPrefetchQueue.length >= 2) return;
+    forYouPrefetching = true;
+    getForYouAssetInternal()
+      .then((a) => {
+        if (a) forYouPrefetchQueue.push(a);
+      })
+      .catch(() => { /* prefetch failure is non-critical */ })
+      .finally(() => { forYouPrefetching = false; });
+  };
+
+  /** Internal version of getForYouAsset that doesn't trigger further prefetch (avoids recursion). */
+  const getForYouAssetInternal = async (): Promise<AssetResponseDto | null> => {
+    try {
+      const userDiscoveryRate = $forYouDiscoveryRate / 100;
+      const effectiveDiscoveryRate = forYouEngine.getAdaptiveDiscoveryRate(userDiscoveryRate);
+      const roll = Math.random();
+      const useDiscovery = forYouEngine.hasInterestBurst()
+        ? roll < effectiveDiscoveryRate * 0.3
+        : roll < effectiveDiscoveryRate;
+
+      let isSmartSearchEnabled = false;
+      try {
+        let features = featureFlagsManager.value;
+        if (!features) {
+          await featureFlagsManager.init();
+          features = featureFlagsManager.value;
+        }
+        if (features?.smartSearch) {
+          isSmartSearchEnabled = true;
+        }
+      } catch { /* ignore */ }
+
+      let selectedAsset: AssetResponseDto | null = null;
+
+      if (useDiscovery) {
+        selectedAsset = await fetchRandomAsset();
+      }
+
+      if (!selectedAsset && !useDiscovery && isSmartSearchEnabled && forYouEngine.hasEngagementData()) {
+        const anchorCount = forYouEngine.hasInterestBurst() ? 2 : undefined;
+        const anchors = forYouEngine.pickQueryAnchorAssetIds(anchorCount);
+        if (anchors.length > 0) {
+          const totalScore = anchors.reduce((s, a) => s + a.score, 0);
+          const TOTAL_BUDGET = 50;
+          const MIN_PER_ANCHOR = 5;
+          const anchorSizes = anchors.map((a) => {
+            const proportional = Math.round((a.score / totalScore) * TOTAL_BUDGET);
+            return Math.max(MIN_PER_ANCHOR, proportional);
+          });
+          const allCandidates: AssetResponseDto[] = [];
+          const results = await Promise.all(anchors.map(async (anchor, idx) => {
+            try {
+              const response = await searchSmart({
+                smartSearchDto: {
+                  queryAssetId: anchor.id,
+                  size: anchorSizes[idx],
+                  withPeople: true,
+                  ...buildFilterParams(),
+                } as Parameters<typeof searchSmart>[0]['smartSearchDto'],
+              });
+              return response.assets.items;
+            } catch { return []; }
+          }));
+          const seen = new Set<string>(anchors.map((a) => a.id));
+          const maxLen = Math.max(...results.map((r) => r.length));
+          for (let i = 0; i < maxLen; i++) {
+            for (const items of results) {
+              if (i < items.length && !seen.has(items[i].id)) {
+                seen.add(items[i].id);
+                allCandidates.push(items[i]);
+              }
+            }
+          }
+          selectedAsset = pickCandidate(allCandidates);
+        }
+      }
+
+      if (!selectedAsset && !useDiscovery && forYouEngine.hasPersonData()) {
+        const personIds = forYouEngine.pickPersonIds();
+        if (personIds.length > 0) {
+          try {
+            const assets = await searchRandom({
+              randomSearchDto: {
+                personIds,
+                size: 5,
+                withPeople: true,
+                ...buildFilterParams(),
+              } as Parameters<typeof searchRandom>[0]['randomSearchDto'],
+            });
+            selectedAsset = pickCandidate(assets);
+          } catch { /* ignore */ }
+        }
+      }
+
+      if (!selectedAsset) {
+        selectedAsset = await fetchRandomAsset();
+      }
+
+      if (selectedAsset) {
+        forYouEngine.addRecentlyShown(selectedAsset.id);
+      }
+      return selectedAsset;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Fetch a random asset respecting user filters and recently-shown avoidance. */
+  const fetchRandomAsset = async (negativeIds?: Set<string>): Promise<AssetResponseDto | null> => {
+    try {
+      const assets = await searchRandom({
+        randomSearchDto: {
+          size: 10,
+          withPeople: true,
+          ...buildFilterParams(),
+        } as Parameters<typeof searchRandom>[0]['randomSearchDto'],
+      });
+      return pickCandidate(assets, negativeIds);
+    } catch (error) {
+      console.error('ForYou: fetchRandomAsset failed', error);
+      return null;
+    }
+  };
+
+  // Record watch time for an asset — delegates to the persistent ForYouEngine.
+  // The engine scores relative to the user's average watch time (no absolute skip threshold).
+  const recordWatchTime = (viewedAsset: AssetResponseDto) => {
+    if (currentAssetStartTime === 0) return;
+    const watchTimeMs = Date.now() - currentAssetStartTime;
+    const personIds = (viewedAsset.people ?? []).filter((p) => p.id).map((p) => p.id);
+    forYouEngine.recordEngagement(viewedAsset.id, watchTimeMs, personIds);
+    currentAssetStartTime = Date.now();
+  };
+
   const navigateAsset = async (order?: 'previous' | 'next', e?: Event) => {
     if (!order) {
       if ($slideshowState === SlideshowState.PlaySlideshow) {
@@ -247,13 +713,56 @@
 
     let hasNext = false;
 
-    if ($slideshowState === SlideshowState.PlaySlideshow && $slideshowNavigation === SlideshowNavigation.Shuffle) {
-      hasNext = order === 'previous' ? slideshowHistory.previous() : slideshowHistory.next();
-      if (!hasNext) {
-        const asset = await onRandom();
-        if (asset) {
-          slideshowHistory.queue(asset);
-          hasNext = true;
+    if ($slideshowNavigation === SlideshowNavigation.RandomLibrary) {
+      // Record watch time before navigating away
+      recordWatchTime(asset);
+
+      if (order === 'previous') {
+        hasNext = slideshowHistory.previous();
+      } else {
+        hasNext = slideshowHistory.next();
+        if (!hasNext) {
+          const newAsset = await getLibraryRandomAsset();
+          if (newAsset) {
+            slideshowHistory.queue(toTimelineAsset(newAsset));
+            setAsset(newAsset);
+            hasNext = true;
+          } else {
+            hasNext = false;
+          }
+        }
+      }
+    } else if ($slideshowNavigation === SlideshowNavigation.ForYou) {
+      // Record watch time before navigating - this is crucial for the algorithm
+      recordWatchTime(asset);
+
+      if (order === 'previous') {
+        hasNext = slideshowHistory.previous();
+      } else {
+        hasNext = slideshowHistory.next();
+        if (!hasNext) {
+          const newAsset = await getForYouAssetFast();
+          if (newAsset) {
+            slideshowHistory.queue(toTimelineAsset(newAsset));
+            setAsset(newAsset);
+            hasNext = true;
+          } else {
+            hasNext = false;
+          }
+        }
+      }
+    } else if ($slideshowState === SlideshowState.PlaySlideshow && $slideshowNavigation === SlideshowNavigation.Shuffle) {
+      if (order === 'previous') {
+        hasNext = slideshowHistory.previous();
+      } else {
+        hasNext = slideshowHistory.next();
+        if (!hasNext) {
+          const randomAsset = await onRandom();
+          if (randomAsset) {
+            slideshowHistory.queue(randomAsset);
+            setAssetId(randomAsset.id);
+            hasNext = true;
+          }
         }
       }
     } else {
@@ -302,6 +811,10 @@
   };
 
   const handlePlaySlideshow = async () => {
+    // ForYou mode starts without fullscreen
+    if ($slideshowNavigation === SlideshowNavigation.ForYou) {
+      return;
+    }
     try {
       await assetViewerHtmlElement?.requestFullscreen?.();
     } catch (error) {
@@ -432,6 +945,10 @@
         onAction={handleAction}
         onRunJob={handleRunJob}
         onPlaySlideshow={() => ($slideshowState = SlideshowState.PlaySlideshow)}
+        onPlayForYou={() => {
+          $slideshowNavigation = SlideshowNavigation.ForYou;
+          $slideshowState = SlideshowState.PlaySlideshow;
+        }}
         onShowDetail={toggleDetailPanel}
         onClose={closeViewer}
         {playOriginalVideo}
@@ -457,6 +974,157 @@
         onClose={() => ($slideshowState = SlideshowState.StopSlideshow)}
       />
     </div>
+  {/if}
+
+  <!-- ForYou Debug Overlay Toggle & Panel -->
+  {#if $slideshowNavigation === SlideshowNavigation.ForYou && $slideshowState !== SlideshowState.None}
+    <button
+      class="absolute top-16 left-2 z-[9999] rounded-full bg-black/60 text-white px-2 py-1 text-xs font-mono hover:bg-black/80 transition-colors"
+      onclick={() => { showForYouDebug = !showForYouDebug; if (showForYouDebug) refreshDebugOverlay(); }}
+    >
+      {showForYouDebug ? '✕ Debug' : '🐛 Debug'}
+    </button>
+
+    {#if showForYouDebug && forYouDebugState}
+      <div class="absolute top-28 left-2 z-[9999] w-[380px] max-h-[70vh] overflow-y-auto rounded-lg bg-black/85 text-white text-xs font-mono p-3 shadow-xl backdrop-blur-sm">
+        <div class="mb-2 flex items-center justify-between">
+          <span class="text-sm font-bold text-yellow-300">ForYou Debug</span>
+          <button
+            class="rounded bg-red-700/80 hover:bg-red-600 px-2 py-0.5 text-[10px] text-white transition-colors"
+            onclick={() => { if (confirm('Reset all ForYou engagement data?')) { forYouEngine.reset(); refreshDebugOverlay(); } }}
+          >🗑 Reset All</button>
+        </div>
+
+        <!-- Summary -->
+        <div class="mb-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
+          <span class="text-gray-400">Strategy:</span><span class="text-green-300">{forYouLastStrategy}</span>
+          <span class="text-gray-400">Total views:</span><span>{forYouDebugState.totalViews}</span>
+          <span class="text-gray-400">Avg watch:</span><span>{forYouDebugState.avgWatchTimeSec}s</span>
+          <span class="text-gray-400">Session size:</span><span>{forYouDebugState.sessionSize}</span>
+          <span class="text-gray-400">Tracked assets:</span><span>{forYouDebugState.trackedAssets}</span>
+          <span class="text-gray-400">Tracked persons:</span><span>{forYouDebugState.trackedPersons}</span>
+          <span class="text-gray-400">Recently shown:</span><span>{forYouDebugState.recentlyShownCount}</span>
+          <span class="text-gray-400">Interest burst:</span><span class={forYouDebugState.interestBurst ? 'text-red-400 font-bold' : ''}>{forYouDebugState.interestBurst ? '🔥 YES' : 'no'}</span>
+        </div>
+
+        <!-- Top Assets -->
+        {#if forYouDebugState.topAssets.length > 0}
+          <details class="mb-1">
+            <summary class="cursor-pointer text-yellow-200 hover:text-yellow-100">Top Assets ({forYouDebugState.topAssets.length})</summary>
+            <table class="w-full mt-1">
+              <thead><tr class="text-gray-500"><th class="text-left"></th><th class="text-left">ID</th><th>Score</th><th>Comb</th><th>Views</th><th>Watch</th><th>Ago</th><th></th></tr></thead>
+              <tbody>
+                {#each forYouDebugState.topAssets as a}
+                  <tr class="border-t border-gray-700/50">
+                    <td>
+                      <button class="block" onclick={() => { expandedThumbId = expandedThumbId === a.fullId ? null : a.fullId; }}>
+                        <img
+                          src={getAssetThumbnailUrl(a.fullId)}
+                          alt={a.id}
+                          class="rounded transition-all {expandedThumbId === a.fullId ? 'w-32 h-32' : 'w-6 h-6'} object-cover cursor-pointer"
+                        />
+                      </button>
+                    </td>
+                    <td class="text-blue-300">{a.id}</td>
+                    <td class="text-right">{a.score.toFixed(1)}</td>
+                    <td class="text-right">{a.combined.toFixed(1)}</td>
+                    <td class="text-center">{a.views}</td>
+                    <td class="text-right">{a.totalWatchSec}s</td>
+                    <td class="text-right text-gray-400">{a.lastSeenAgo}</td>
+                    <td><button class="text-red-400 hover:text-red-200 px-1" title="Remove" onclick={() => { forYouEngine.removeAsset(a.fullId); refreshDebugOverlay(); }}>✕</button></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </details>
+        {/if}
+
+        <!-- Bottom Assets (disliked) -->
+        {#if forYouDebugState.bottomAssets.length > 0}
+          <details class="mb-1">
+            <summary class="cursor-pointer text-red-300 hover:text-red-200">Disliked Assets ({forYouDebugState.bottomAssets.length})</summary>
+            <table class="w-full mt-1">
+              <thead><tr class="text-gray-500"><th class="text-left"></th><th class="text-left">ID</th><th>Score</th><th>Views</th><th></th></tr></thead>
+              <tbody>
+                {#each forYouDebugState.bottomAssets as a}
+                  <tr class="border-t border-gray-700/50">
+                    <td>
+                      <button class="block" onclick={() => { expandedThumbId = expandedThumbId === a.fullId ? null : a.fullId; }}>
+                        <img
+                          src={getAssetThumbnailUrl(a.fullId)}
+                          alt={a.id}
+                          class="rounded transition-all {expandedThumbId === a.fullId ? 'w-32 h-32' : 'w-6 h-6'} object-cover cursor-pointer"
+                        />
+                      </button>
+                    </td>
+                    <td class="text-red-400">{a.id}</td>
+                    <td class="text-right">{a.score.toFixed(1)}</td>
+                    <td class="text-center">{a.views}</td>
+                    <td><button class="text-red-400 hover:text-red-200 px-1" title="Remove" onclick={() => { forYouEngine.removeAsset(a.fullId); refreshDebugOverlay(); }}>✕</button></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </details>
+        {/if}
+
+        <!-- Top Persons -->
+        {#if forYouDebugState.topPersons.length > 0}
+          <details class="mb-1">
+            <summary class="cursor-pointer text-purple-300 hover:text-purple-200">Top Persons ({forYouDebugState.topPersons.length})</summary>
+            <div class="mt-1">
+              {#each forYouDebugState.topPersons as p}
+                <div class="flex justify-between border-t border-gray-700/50 py-0.5">
+                  <span class="text-purple-300">{p.id}</span>
+                  <span>score={p.score.toFixed(1)} views={p.views}</span>
+                  <button class="text-red-400 hover:text-red-200 px-1 ml-1" title="Remove" onclick={() => { forYouEngine.removePerson(p.fullId); refreshDebugOverlay(); }}>✕</button>
+                </div>
+              {/each}
+            </div>
+          </details>
+        {/if}
+
+        <!-- Log -->
+        <details>
+          <summary class="cursor-pointer text-gray-300 hover:text-gray-100">Log ({forYouDebugLogs.filter(e => LOG_LEVELS.indexOf(e.level) >= LOG_LEVELS.indexOf(debugLogLevel)).length})</summary>
+          <div class="flex gap-1 mt-1 mb-1">
+            {#each LOG_LEVELS as lvl}
+              {@const active = LOG_LEVELS.indexOf(lvl) >= LOG_LEVELS.indexOf(debugLogLevel)}
+              {@const colors = { debug: 'bg-gray-600', info: 'bg-blue-600', warn: 'bg-yellow-600', error: 'bg-red-600' }}
+              {@const labels = { debug: 'DBG', info: 'INF', warn: 'WRN', error: 'ERR' }}
+              <button
+                class="rounded px-1.5 py-0.5 text-[9px] font-bold text-white transition-opacity {colors[lvl]} {active ? 'opacity-100' : 'opacity-30'}"
+                onclick={() => { debugLogLevel = lvl; }}
+              >{labels[lvl]}+</button>
+            {/each}
+          </div>
+          <div class="mt-1 max-h-[200px] overflow-y-auto text-[10px] leading-tight">
+            {#each forYouDebugLogs.filter(e => LOG_LEVELS.indexOf(e.level) >= LOG_LEVELS.indexOf(debugLogLevel)).slice().reverse() as entry}
+              <div class="border-t border-gray-800 py-0.5">
+                <span class="text-gray-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                {#if entry.level === 'error'}
+                  <span class="inline-block rounded px-1 text-[9px] font-bold bg-red-600 text-white mr-0.5">ERR</span>
+                {:else if entry.level === 'warn'}
+                  <span class="inline-block rounded px-1 text-[9px] font-bold bg-yellow-600 text-white mr-0.5">WRN</span>
+                {:else if entry.level === 'info'}
+                  <span class="inline-block rounded px-1 text-[9px] font-bold bg-blue-600 text-white mr-0.5">INF</span>
+                {:else}
+                  <span class="inline-block rounded px-1 text-[9px] font-bold bg-gray-600 text-gray-300 mr-0.5">DBG</span>
+                {/if}
+                {entry.message}
+              </div>
+            {/each}
+          </div>
+        </details>
+
+        <button
+          class="mt-2 w-full rounded bg-gray-700 hover:bg-gray-600 py-1 text-center"
+          onclick={() => { clearForYouDebugLog(); refreshDebugOverlay(); }}
+        >
+          Clear Log
+        </button>
+      </div>
+    {/if}
   {/if}
 
   {#if $slideshowState === SlideshowState.None && showNavigation && !isShowEditor}
