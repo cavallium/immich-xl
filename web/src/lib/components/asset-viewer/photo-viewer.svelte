@@ -12,7 +12,7 @@
   import { ocrManager } from '$lib/stores/ocr.svelte';
   import { boundingBoxesArray } from '$lib/stores/people.store';
   import { alwaysLoadOriginalFile } from '$lib/stores/preferences.store';
-  import { SlideshowLook, SlideshowState, slideshowLookCssMapping, slideshowStore } from '$lib/stores/slideshow.store';
+  import { SlideshowLook, SlideshowNavigation, SlideshowState, slideshowLookCssMapping, slideshowNavigation, slideshowStore } from '$lib/stores/slideshow.store';
   import { photoZoomState } from '$lib/stores/zoom-image.store';
   import { getAssetOriginalUrl, getAssetThumbnailUrl, handlePromiseError } from '$lib/utils';
   import { canCopyImageToClipboard, copyImageToClipboard, isWebCompatibleImage } from '$lib/utils/asset-utils';
@@ -146,11 +146,15 @@
       return;
     }
 
-    if (onNextAsset && event.detail.direction === 'left') {
+    const isForYou = $slideshowNavigation === SlideshowNavigation.ForYou;
+    const nextDir = isForYou ? 'top' : 'left';
+    const prevDir = isForYou ? 'bottom' : 'right';
+
+    if (onNextAsset && event.detail.direction === nextDir) {
       onNextAsset();
     }
 
-    if (onPreviousAsset && event.detail.direction === 'right') {
+    if (onPreviousAsset && event.detail.direction === prevDir) {
       onPreviousAsset();
     }
   };

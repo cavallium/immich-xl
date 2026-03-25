@@ -13,6 +13,7 @@
   import { getAssetOriginalUrl, getAssetPlaybackUrl, getAssetThumbnailUrl } from '$lib/utils';
   import { AssetMediaSize } from '@immich/sdk';
   import { LoadingSpinner } from '@immich/ui';
+  import { SlideshowNavigation, slideshowNavigation } from '$lib/stores/slideshow.store';
   import { onDestroy, onMount } from 'svelte';
   import { useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
   import { fade } from 'svelte/transition';
@@ -99,10 +100,14 @@
   };
 
   const onSwipe = (event: SwipeCustomEvent) => {
-    if (event.detail.direction === 'left') {
+    const isForYou = $slideshowNavigation === SlideshowNavigation.ForYou;
+    const nextDir = isForYou ? 'top' : 'left';
+    const prevDir = isForYou ? 'bottom' : 'right';
+
+    if (event.detail.direction === nextDir) {
       onNextAsset();
     }
-    if (event.detail.direction === 'right') {
+    if (event.detail.direction === prevDir) {
       onPreviousAsset();
     }
   };

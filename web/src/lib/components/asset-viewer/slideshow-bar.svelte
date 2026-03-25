@@ -150,6 +150,8 @@
     { shortcut: { key: 'Escape' }, onShortcut: onClose },
     { shortcut: { key: 'ArrowLeft' }, onShortcut: onPrevious },
     { shortcut: { key: 'ArrowRight' }, onShortcut: onNext },
+    { shortcut: { key: 'ArrowUp' }, onShortcut: onPrevious },
+    { shortcut: { key: 'ArrowDown' }, onShortcut: onNext },
     {
       shortcut: { key: ' ' },
       onShortcut: () => {
