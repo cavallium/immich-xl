@@ -1086,10 +1086,15 @@
           <span class="text-gray-400">Strategy:</span><span class="text-green-300">{forYouLastStrategy}</span>
           <span class="text-gray-400">Total views:</span><span>{forYouDebugState.totalViews}</span>
           <span class="text-gray-400">Avg watch:</span><span>{forYouDebugState.avgWatchTimeSec}s</span>
+          <span class="text-gray-400">📷 Photo avg:</span><span>{forYouDebugState.avgPhotoWatchSec}s <span class="text-gray-500">({forYouDebugState.photoViews})</span></span>
+          <span class="text-gray-400">🎞️ GIF avg:</span><span>{forYouDebugState.avgGifWatchSec}s <span class="text-gray-500">({forYouDebugState.gifViews})</span></span>
+          <span class="text-gray-400">🎬 Video avg:</span><span>{forYouDebugState.avgVideoWatchSec}s <span class="text-gray-500">({forYouDebugState.videoViews})</span></span>
           <span class="text-gray-400">Session size:</span><span>{forYouDebugState.sessionSize}</span>
           <span class="text-gray-400">Tracked assets:</span><span>{forYouDebugState.trackedAssets}</span>
           <span class="text-gray-400">Tracked persons:</span><span>{forYouDebugState.trackedPersons}</span>
+          <span class="text-gray-400">❤️ Liked:</span><span>{forYouDebugState.likedCount}</span>
           <span class="text-gray-400">Recently shown:</span><span>{forYouDebugState.recentlyShownCount}</span>
+          <span class="text-gray-400">Cold dampen:</span><span class={forYouDebugState.coldDampen < 1 ? 'text-orange-400' : ''}>{forYouDebugState.coldDampen < 1 ? `⚠️ ${forYouDebugState.coldDampen}` : '1.0'}</span>
           <span class="text-gray-400">Interest burst:</span><span class={forYouDebugState.interestBurst ? 'text-red-400 font-bold' : ''}>{forYouDebugState.interestBurst ? '🔥 YES' : 'no'}</span>
         </div>
 
@@ -1098,7 +1103,7 @@
           <details class="mb-1">
             <summary class="cursor-pointer text-yellow-200 hover:text-yellow-100">Top Assets ({forYouDebugState.topAssets.length})</summary>
             <table class="w-full mt-1">
-              <thead><tr class="text-gray-500"><th class="text-left"></th><th class="text-left">ID</th><th>Score</th><th>Comb</th><th>Views</th><th>Watch</th><th>Ago</th><th></th></tr></thead>
+              <thead><tr class="text-gray-500"><th class="text-left"></th><th class="text-left">ID</th><th></th><th>Score</th><th>Comb</th><th>Views</th><th>Watch</th><th>Ago</th><th></th></tr></thead>
               <tbody>
                 {#each forYouDebugState.topAssets as a}
                   <tr class="border-t border-gray-700/50">
@@ -1112,6 +1117,7 @@
                       </button>
                     </td>
                     <td class="text-blue-300">{a.id}</td>
+                    <td class="text-center">{a.liked ? '❤️' : ''}{a.mediaType === 'video' ? '🎬' : a.mediaType === 'gif' ? '🎞️' : '📷'}</td>
                     <td class="text-right">{a.score.toFixed(1)}</td>
                     <td class="text-right">{a.combined.toFixed(1)}</td>
                     <td class="text-center">{a.views}</td>
@@ -1160,10 +1166,28 @@
             <summary class="cursor-pointer text-purple-300 hover:text-purple-200">Top Persons ({forYouDebugState.topPersons.length})</summary>
             <div class="mt-1">
               {#each forYouDebugState.topPersons as p}
-                <div class="flex justify-between border-t border-gray-700/50 py-0.5">
-                  <span class="text-purple-300">{p.id}</span>
-                  <span>score={p.score.toFixed(1)} views={p.views}</span>
-                  <button class="text-red-400 hover:text-red-200 px-1 ml-1" title="Remove" onclick={() => { forYouEngine.removePerson(p.fullId); refreshDebugOverlay(); }}>✕</button>
+                <div class="flex items-center gap-1.5 border-t border-gray-700/50 py-0.5">
+                  <img src="/api/people/{p.fullId}/thumbnail" alt="" class="h-6 w-6 rounded-full object-cover flex-shrink-0" />
+                  <span class="text-purple-300 truncate">{p.id}</span>
+                  <span class="ml-auto whitespace-nowrap">score={p.score.toFixed(1)} views={p.views}</span>
+                  <button class="text-red-400 hover:text-red-200 px-1 ml-1 flex-shrink-0" title="Remove" onclick={() => { forYouEngine.removePerson(p.fullId); refreshDebugOverlay(); }}>✕</button>
+                </div>
+              {/each}
+            </div>
+          </details>
+        {/if}
+
+        <!-- Bottom Persons (disliked) -->
+        {#if forYouDebugState.bottomPersons.length > 0}
+          <details class="mb-1">
+            <summary class="cursor-pointer text-red-300 hover:text-red-200">Disliked Persons ({forYouDebugState.bottomPersons.length})</summary>
+            <div class="mt-1">
+              {#each forYouDebugState.bottomPersons as p}
+                <div class="flex items-center gap-1.5 border-t border-gray-700/50 py-0.5">
+                  <img src="/api/people/{p.fullId}/thumbnail" alt="" class="h-6 w-6 rounded-full object-cover flex-shrink-0" />
+                  <span class="text-red-400 truncate">{p.id}</span>
+                  <span class="ml-auto whitespace-nowrap">score={p.score.toFixed(1)} views={p.views}</span>
+                  <button class="text-red-400 hover:text-red-200 px-1 ml-1 flex-shrink-0" title="Remove" onclick={() => { forYouEngine.removePerson(p.fullId); refreshDebugOverlay(); }}>✕</button>
                 </div>
               {/each}
             </div>

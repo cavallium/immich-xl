@@ -823,6 +823,8 @@ class ForYouEngine {
         views: e.viewCount,
         totalWatchSec: +(e.totalWatchTimeMs / 1000).toFixed(1),
         lastSeenAgo: `${((now - e.lastSeenAt) / 60_000).toFixed(0)}m`,
+        liked: e.liked ?? false,
+        mediaType: (e.mediaType ?? 'photo') as ForYouMediaType,
       };
     });
     assetEntries.sort((a, b) => b.combined - a.combined);
@@ -835,17 +837,35 @@ class ForYouEngine {
     }));
     personEntries.sort((a, b) => b.score - a.score);
 
+    // Cold-start dampening factor (0.1 → 1.0)
+    const views = this.state.totalGlobalViewCount;
+    const coldDampen = views < MIN_VIEWS_FOR_AVERAGE
+      ? 0.1 + 0.9 * (views / MIN_VIEWS_FOR_AVERAGE)
+      : 1.0;
+
+    // Liked asset count
+    const likedCount = Object.values(this.state.assets).filter((e) => e.liked).length;
+
     return {
       totalViews: this.state.totalGlobalViewCount,
       avgWatchTimeSec: +(this.getAverageWatchTimeMs() / 1000).toFixed(1),
+      avgPhotoWatchSec: +(this.getTypeAverageWatchTimeMs('photo') / 1000).toFixed(1),
+      avgGifWatchSec: +(this.getTypeAverageWatchTimeMs('gif') / 1000).toFixed(1),
+      avgVideoWatchSec: +(this.getTypeAverageWatchTimeMs('video') / 1000).toFixed(1),
+      photoViews: this.state.totalPhotoViewCount,
+      gifViews: this.state.totalGifViewCount,
+      videoViews: this.state.totalVideoViewCount,
       trackedAssets: Object.keys(this.state.assets).length,
       trackedPersons: Object.keys(this.state.persons).length,
+      likedCount,
       recentlyShownCount: this.state.recentlyShown.length,
       sessionSize: this.sessionRing.length,
+      coldDampen: +coldDampen.toFixed(2),
       interestBurst: this.sessionRing.length >= 6 ? this.hasInterestBurst() : false,
       topAssets: assetEntries.slice(0, 10),
       bottomAssets: assetEntries.filter((a) => a.score < 0).slice(-5).reverse(),
       topPersons: personEntries.slice(0, 5),
+      bottomPersons: personEntries.filter((p) => p.score < 0).slice(-5).reverse(),
     };
   }
 
