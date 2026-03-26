@@ -136,7 +136,7 @@ const TOP_NEGATIVE_ANCHOR_POOL = 5;
 
 // ── Adaptive discovery constants ──────────────────────────────────────────
 /** Base discovery rate multiplier during cold-start (few views). */
-const COLD_START_DISCOVERY_MULTIPLIER = 4.0;
+const COLD_START_DISCOVERY_MULTIPLIER = 2.0;
 /** Number of views after which cold-start boost fully fades. */
 const COLD_START_FADE_VIEWS = 40;
 /** Minimum effective discovery rate (fraction, not percent). */
@@ -813,11 +813,6 @@ class ForYouEngine {
     // A burst is detected when recent normalised watch time is >1.8× the older average
     const ratio = avgOlder > 0 ? avgRecent / avgOlder : 0;
     const burst = avgOlder > 0 && ratio > 1.8;
-    fyLog(
-      `interestBurst: sessionSize=${this.sessionRing.length} ` +
-      `recentAvg=${avgRecent.toFixed(2)} olderAvg=${avgOlder.toFixed(2)} ` +
-      `ratio=${ratio.toFixed(2)} → burst=${burst}`,
-    );
     return burst;
   }
 
