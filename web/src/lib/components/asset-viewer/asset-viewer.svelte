@@ -34,12 +34,14 @@
     runAssetJobs,
     searchRandom,
     searchSmart,
+    updateAsset,
     type AlbumResponseDto,
     type AssetResponseDto,
     type PersonResponseDto,
     type StackResponseDto,
   } from '@immich/sdk';
   import { toastManager } from '@immich/ui';
+  import { mdiHeart, mdiHeartOutline } from '@mdi/js';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { fly } from 'svelte/transition';
@@ -125,6 +127,15 @@
   let forYouDebugLogs: ForYouLogEntry[] = $state([]);
   let forYouLastStrategy = $state('');
 
+  // Heart / like state for ForYou mode
+  let showHeartAnimation = $state(false);
+  let lastTapTime = 0;
+  const DOUBLE_TAP_THRESHOLD_MS = 300;
+  /** Set of asset IDs that have been boosted (liked/re-boosted), persisted via the engine. */
+  let forYouBoostedIds: Set<string> = $state(forYouEngine.getLikedAssetIds());
+  /** Whether the current asset has been boosted in this ForYou session. */
+  let isCurrentAssetBoosted = $derived(forYouBoostedIds.has(asset.id));
+
   function fyLog(msg: string, level: ForYouLogLevel = 'debug'): void {
     const entry: ForYouLogEntry = { timestamp: Date.now(), message: msg, level };
     getForYouDebugLog().push(entry);
@@ -186,6 +197,57 @@
       } catch (error) {
         handleError(error, $t('errors.unable_to_change_favorite'));
       }
+    }
+  };
+
+  /** Like (heart) the current asset in ForYou mode — toggles server favorite and boosts the engine. */
+  const handleForYouLike = async () => {
+    try {
+      const newFav = !asset.isFavorite;
+      const data = await updateAsset({ id: asset.id, updateAssetDto: { isFavorite: newFav } });
+      asset = { ...asset, isFavorite: data.isFavorite };
+      if (data.isFavorite) {
+        forYouEngine.recordLike(asset.id);
+        forYouBoostedIds.add(asset.id);
+        forYouBoostedIds = new Set(forYouBoostedIds); // trigger reactivity
+        // Trigger heart animation
+        showHeartAnimation = true;
+        setTimeout(() => { showHeartAnimation = false; }, 800);
+      } else {
+        // Un-favorited — remove boost marker
+        forYouBoostedIds.delete(asset.id);
+        forYouBoostedIds = new Set(forYouBoostedIds);
+      }
+    } catch (error) {
+      handleError(error, $t('errors.unable_to_add_remove_favorites'));
+    }
+  };
+
+  // Reset double-tap state when asset changes to prevent cross-asset accidental likes
+  $effect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    asset.id; // track asset changes
+    lastTapTime = 0;
+  });
+
+  /** Double-tap handler for the asset viewer area in ForYou mode. */
+  const handleAssetDoubleTap = () => {
+    const now = Date.now();
+    if (now - lastTapTime < DOUBLE_TAP_THRESHOLD_MS) {
+      // Double tap detected — like or re-boost if already favorited
+      if (!asset.isFavorite) {
+        handlePromiseError(handleForYouLike());
+      } else {
+        // Already favorited — still boost the engine and show animation
+        forYouEngine.recordLike(asset.id);
+        forYouBoostedIds.add(asset.id);
+        forYouBoostedIds = new Set(forYouBoostedIds);
+        showHeartAnimation = true;
+        setTimeout(() => { showHeartAnimation = false; }, 800);
+      }
+      lastTapTime = 0;
+    } else {
+      lastTapTime = now;
     }
   };
 
@@ -855,6 +917,9 @@
     } finally {
       $stopSlideshowProgress = true;
       $slideshowState = SlideshowState.None;
+      // Update the URL to the currently viewed asset so closing the viewer
+      // navigates back to it instead of the asset the slideshow started on.
+      await goto(`${AppRoute.PHOTOS}/${asset.id}`, { replaceState: true });
     }
   };
 
@@ -1155,7 +1220,13 @@
   {/if}
 
   <!-- Asset Viewer -->
-  <div class="z-[-1] relative col-start-1 col-span-4 row-start-1 row-span-full">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="z-[-1] relative col-start-1 col-span-4 row-start-1 row-span-full"
+    onclick={$slideshowNavigation === SlideshowNavigation.ForYou && $slideshowState !== SlideshowState.None ? handleAssetDoubleTap : undefined}
+    ondblclick={$slideshowNavigation === SlideshowNavigation.ForYou && $slideshowState !== SlideshowState.None ? (e) => { e.preventDefault(); e.stopPropagation(); } : undefined}
+  >
     {#if previewStackedAsset}
       {#key previewStackedAsset.id}
         {#if previewStackedAsset.type === AssetTypeEnum.Image}
@@ -1250,6 +1321,45 @@
           </div>
         {/if}
       {/key}
+    {/if}
+
+    <!-- ForYou heart button + animation -->
+    {#if $slideshowNavigation === SlideshowNavigation.ForYou && $slideshowState !== SlideshowState.None}
+      <!-- Heart animation on double-tap / like -->
+      {#if showHeartAnimation}
+        <div class="absolute inset-0 flex items-center justify-center pointer-events-none z-[100]">
+          <svg class="w-32 h-32 heart-pop" viewBox="0 0 24 24" fill="#ef4444" xmlns="http://www.w3.org/2000/svg">
+            <path d={mdiHeart} />
+          </svg>
+        </div>
+      {/if}
+
+      <!-- Heart button (bottom-right) -->
+      <!-- Three visual states: not favorited (outline), pre-favorited but not boosted (dim red), boosted/liked in session (full red) -->
+      <button
+        class="absolute bottom-6 right-6 z-[50] rounded-full bg-black/50 p-3 transition-all hover:bg-black/70 active:scale-90"
+        onclick={(e) => {
+          e.stopPropagation();
+          if (asset.isFavorite && !isCurrentAssetBoosted) {
+            // Pre-favorited: boost without toggling favorite off
+            forYouEngine.recordLike(asset.id);
+            forYouBoostedIds.add(asset.id);
+            forYouBoostedIds = new Set(forYouBoostedIds);
+            showHeartAnimation = true;
+            setTimeout(() => { showHeartAnimation = false; }, 800);
+          } else {
+            handlePromiseError(handleForYouLike());
+          }
+        }}
+        aria-label={asset.isFavorite ? (isCurrentAssetBoosted ? 'Unlike' : 'Boost') : 'Like'}
+      >
+        <svg class="w-8 h-8" viewBox="0 0 24 24"
+          fill={asset.isFavorite ? (isCurrentAssetBoosted ? '#ef4444' : 'rgba(239, 68, 68, 0.4)') : 'none'}
+          stroke={asset.isFavorite ? (isCurrentAssetBoosted ? '#ef4444' : 'rgba(239, 68, 68, 0.5)') : 'white'}
+          stroke-width="1.5" xmlns="http://www.w3.org/2000/svg">
+          <path d={asset.isFavorite ? mdiHeart : mdiHeartOutline} />
+        </svg>
+      </button>
     {/if}
   </div>
 
@@ -1363,5 +1473,38 @@
   .horizontal-scrollbar::-webkit-scrollbar-thumb:hover {
     background: #adcbfa;
     border-radius: 16px;
+  }
+
+  /* Heart pop animation for ForYou double-tap like */
+  :global(.heart-pop) {
+    animation: heart-pop 0.8s ease-out forwards;
+    filter: drop-shadow(0 0 12px rgba(239, 68, 68, 0.6));
+  }
+
+  @keyframes heart-pop {
+    0% {
+      transform: scale(0);
+      opacity: 0;
+    }
+    15% {
+      transform: scale(1.3);
+      opacity: 1;
+    }
+    30% {
+      transform: scale(0.95);
+      opacity: 1;
+    }
+    45% {
+      transform: scale(1.05);
+      opacity: 1;
+    }
+    70% {
+      transform: scale(1);
+      opacity: 1;
+    }
+    100% {
+      transform: scale(1);
+      opacity: 0;
+    }
   }
 </style>

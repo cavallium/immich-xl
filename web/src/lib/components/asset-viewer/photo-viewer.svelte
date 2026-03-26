@@ -81,6 +81,7 @@
   );
 
   let isOcrActive = $derived(ocrManager.showOverlay);
+  let isForYouSlideshow = $derived($slideshowNavigation === SlideshowNavigation.ForYou && $slideshowState !== SlideshowState.None);
 
   const preload = (targetSize: AssetMediaSize | 'original', preloadAssets?: TimelineAsset[]) => {
     for (const preloadAsset of preloadAssets || []) {
@@ -255,7 +256,7 @@
     </div>
   {:else if !imageError}
     <div
-      use:zoomImageAction={{ disabled: isOcrActive }}
+      use:zoomImageAction={{ disabled: isOcrActive, disableDoubleTapZoom: isForYouSlideshow }}
       {...useSwipe(onSwipe)}
       class="h-full w-full"
       transition:fade={{ duration: haveFadeTransition ? assetViewerFadeDuration : 0 }}

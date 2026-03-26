@@ -72,6 +72,8 @@ export interface AssetEngagement {
   score: number;
   /** Media type (used for type-normalised scoring). */
   mediaType?: ForYouMediaType;
+  /** Whether the user explicitly liked (hearted) this asset. */
+  liked?: boolean;
 }
 
 /** A single engagement record for a person (face cluster). */
@@ -110,7 +112,7 @@ export interface ForYouState {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = 'for-you-engine-state';
-const STATE_VERSION = 8;
+const STATE_VERSION = 9;
 
 /** Minimum watch time (ms) to count engagement for a revisited asset. */
 const MIN_REVISIT_WATCH_TIME_MS = 2000;
@@ -144,6 +146,9 @@ const MIN_DISCOVERY_RATE = 0.10;
  * Positive when above average, negative when below.
  */
 const RELATIVE_TIME_SCORE_PER_SEC = 1.0;
+
+/** Score boost applied when the user explicitly likes (hearts) an asset. */
+const LIKE_BOOST = 8.0;
 
 // ── Session momentum constants ────────────────────────────────────────────
 /** How many recent interactions form the "session window". */
@@ -480,6 +485,23 @@ class ForYouEngine {
     }
   }
 
+  /**
+   * Record an explicit like (heart) on an asset. This gives a strong
+   * positive signal — much stronger than passive watch time.
+   */
+  recordLike(assetId: string): void {
+    const now = Date.now();
+    const ae: AssetEngagement = this.state.assets[assetId] ?? {
+      totalWatchTimeMs: 0, viewCount: 0, lastSeenAt: now, score: 0,
+    };
+    ae.liked = true;
+    ae.lastSeenAt = now;
+    ae.score = this.computeAssetScore(ae, now);
+    this.state.assets[assetId] = ae;
+    fyLog(`recordLike: asset=${assetId.slice(0, 8)}… liked=true score=${ae.score.toFixed(3)}`);
+    this.save();
+  }
+
   // ── Public API: query recommendations ────────────────────────────────────
 
   /**
@@ -671,6 +693,11 @@ class ForYouEngine {
         interestBoost = as_ * 0.5; // mild boost for previously liked content
         score += interestBoost;
       }
+      // Strong boost for explicitly liked (hearted) assets
+      if (ae.liked) {
+        interestBoost += LIKE_BOOST;
+        score += LIKE_BOOST;
+      }
     }
 
     // Freshness bonus for never-seen assets
@@ -727,6 +754,17 @@ class ForYouEngine {
   /** Get all tracked asset IDs (for filtering out already-seen). */
   getTrackedAssetIds(): Set<string> {
     return new Set(Object.keys(this.state.assets));
+  }
+
+  /** Get all asset IDs that the user explicitly liked/boosted (persisted across sessions). */
+  getLikedAssetIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const [id, e] of Object.entries(this.state.assets)) {
+      if (e.liked) {
+        ids.add(id);
+      }
+    }
+    return ids;
   }
 
   /**
