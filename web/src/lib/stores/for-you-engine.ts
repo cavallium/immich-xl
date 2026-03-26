@@ -502,6 +502,18 @@ class ForYouEngine {
     this.save();
   }
 
+  /**
+   * Remove the like/boost from an asset (e.g. when un-favoriting).
+   */
+  recordUnlike(assetId: string): void {
+    const ae = this.state.assets[assetId];
+    if (!ae) return;
+    ae.liked = false;
+    ae.score = this.computeAssetScore(ae, Date.now());
+    fyLog(`recordUnlike: asset=${assetId.slice(0, 8)}… liked=false score=${ae.score.toFixed(3)}`);
+    this.save();
+  }
+
   // ── Public API: query recommendations ────────────────────────────────────
 
   /**

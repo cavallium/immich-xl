@@ -121,6 +121,29 @@
   // Debug overlay state
   let expandedThumbId = $state<string | null>(null);
   let showForYouDebug = $state(false);
+  let forYouDebugInterval: ReturnType<typeof setInterval> | null = null;
+
+  $effect(() => {
+    // Refresh debug overlay on asset change
+    if (showForYouDebug && asset.id) {
+      refreshDebugOverlay();
+    }
+  });
+
+  $effect(() => {
+    if (showForYouDebug) {
+      forYouDebugInterval = setInterval(refreshDebugOverlay, 1000);
+    } else if (forYouDebugInterval) {
+      clearInterval(forYouDebugInterval);
+      forYouDebugInterval = null;
+    }
+    return () => {
+      if (forYouDebugInterval) {
+        clearInterval(forYouDebugInterval);
+        forYouDebugInterval = null;
+      }
+    };
+  });
   let debugLogLevel: ForYouLogLevel = $state('debug');
   const LOG_LEVELS: ForYouLogLevel[] = ['debug', 'info', 'warn', 'error'];
   let forYouDebugState: ReturnType<typeof forYouEngine.getDebugState> | null = $state(null);
@@ -214,7 +237,8 @@
         showHeartAnimation = true;
         setTimeout(() => { showHeartAnimation = false; }, 800);
       } else {
-        // Un-favorited — remove boost marker
+        // Un-favorited — remove boost marker and update engine
+        forYouEngine.recordUnlike(asset.id);
         forYouBoostedIds.delete(asset.id);
         forYouBoostedIds = new Set(forYouBoostedIds);
       }
