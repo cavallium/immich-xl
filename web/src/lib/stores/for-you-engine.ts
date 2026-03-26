@@ -57,6 +57,9 @@ export function clearForYouDebugLog(): void {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/** Media type for per-type watch time normalisation. */
+export type ForYouMediaType = 'photo' | 'gif' | 'video';
+
 /** A single engagement record for an asset. */
 export interface AssetEngagement {
   /** Total accumulated watch time in ms across all views. */
@@ -67,6 +70,8 @@ export interface AssetEngagement {
   lastSeenAt: number;
   /** Computed engagement score (updated on every interaction). */
   score: number;
+  /** Media type (used for type-normalised scoring). */
+  mediaType?: ForYouMediaType;
 }
 
 /** A single engagement record for a person (face cluster). */
@@ -93,12 +98,22 @@ export interface ForYouState {
   totalGlobalWatchTimeMs: number;
   /** Running total of all views for computing the global average. */
   totalGlobalViewCount: number;
+  /** Running totals split by media type to avoid video/gif bias. */
+  totalPhotoWatchTimeMs: number;
+  totalPhotoViewCount: number;
+  totalGifWatchTimeMs: number;
+  totalGifViewCount: number;
+  totalVideoWatchTimeMs: number;
+  totalVideoViewCount: number;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = 'for-you-engine-state';
-const STATE_VERSION = 6;
+const STATE_VERSION = 8;
+
+/** Minimum watch time (ms) to count engagement for a revisited asset. */
+const MIN_REVISIT_WATCH_TIME_MS = 2000;
 
 /** Minimum number of views before we use the relative average (cold-start). */
 const MIN_VIEWS_FOR_AVERAGE = 5;
@@ -119,11 +134,11 @@ const TOP_NEGATIVE_ANCHOR_POOL = 5;
 
 // ── Adaptive discovery constants ──────────────────────────────────────────
 /** Base discovery rate multiplier during cold-start (few views). */
-const COLD_START_DISCOVERY_MULTIPLIER = 3.0;
+const COLD_START_DISCOVERY_MULTIPLIER = 4.0;
 /** Number of views after which cold-start boost fully fades. */
-const COLD_START_FADE_VIEWS = 30;
+const COLD_START_FADE_VIEWS = 40;
 /** Minimum effective discovery rate (fraction, not percent). */
-const MIN_DISCOVERY_RATE = 0.02;
+const MIN_DISCOVERY_RATE = 0.10;
 /**
  * Score per second of watch time relative to the average.
  * Positive when above average, negative when below.
@@ -216,7 +231,13 @@ class ForYouEngine {
   }
 
   private emptyState(): ForYouState {
-    return { version: STATE_VERSION, assets: {}, persons: {}, recentlyShown: [], totalGlobalWatchTimeMs: 0, totalGlobalViewCount: 0 };
+    return {
+      version: STATE_VERSION, assets: {}, persons: {}, recentlyShown: [],
+      totalGlobalWatchTimeMs: 0, totalGlobalViewCount: 0,
+      totalPhotoWatchTimeMs: 0, totalPhotoViewCount: 0,
+      totalGifWatchTimeMs: 0, totalGifViewCount: 0,
+      totalVideoWatchTimeMs: 0, totalVideoViewCount: 0,
+    };
   }
 
   // ── Eviction ─────────────────────────────────────────────────────────────
@@ -226,7 +247,24 @@ class ForYouEngine {
     if (assetEntries.length > MAX_TRACKED_ASSETS) {
       assetEntries.sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
       const toRemove = assetEntries.slice(0, assetEntries.length - MAX_TRACKED_ASSETS);
-      for (const [id] of toRemove) delete this.state.assets[id];
+      for (const [id, ae] of toRemove) {
+        // Subtract evicted data from running totals to prevent average drift.
+        // Clamp to 0 to guard against negative totals from mediaType changes.
+        this.state.totalGlobalWatchTimeMs = Math.max(0, this.state.totalGlobalWatchTimeMs - ae.totalWatchTimeMs);
+        this.state.totalGlobalViewCount = Math.max(0, this.state.totalGlobalViewCount - ae.viewCount);
+        const mt = ae.mediaType ?? 'photo';
+        if (mt === 'video') {
+          this.state.totalVideoWatchTimeMs = Math.max(0, this.state.totalVideoWatchTimeMs - ae.totalWatchTimeMs);
+          this.state.totalVideoViewCount = Math.max(0, this.state.totalVideoViewCount - ae.viewCount);
+        } else if (mt === 'gif') {
+          this.state.totalGifWatchTimeMs = Math.max(0, this.state.totalGifWatchTimeMs - ae.totalWatchTimeMs);
+          this.state.totalGifViewCount = Math.max(0, this.state.totalGifViewCount - ae.viewCount);
+        } else {
+          this.state.totalPhotoWatchTimeMs = Math.max(0, this.state.totalPhotoWatchTimeMs - ae.totalWatchTimeMs);
+          this.state.totalPhotoViewCount = Math.max(0, this.state.totalPhotoViewCount - ae.viewCount);
+        }
+        delete this.state.assets[id];
+      }
     }
     const personEntries = Object.entries(this.state.persons);
     if (personEntries.length > MAX_TRACKED_PERSONS) {
@@ -253,18 +291,47 @@ class ForYouEngine {
   }
 
   /**
+   * Compute the average watch time for a specific media type.
+   * Falls back to the global average if not enough type-specific data exists.
+   * This prevents videos/gifs from always scoring higher than photos due to
+   * their inherently longer watch times.
+   */
+  private getTypeAverageWatchTimeMs(mediaType: ForYouMediaType): number {
+    const typeWatchMs = mediaType === 'video' ? this.state.totalVideoWatchTimeMs
+      : mediaType === 'gif' ? this.state.totalGifWatchTimeMs
+      : this.state.totalPhotoWatchTimeMs;
+    const typeViews = mediaType === 'video' ? this.state.totalVideoViewCount
+      : mediaType === 'gif' ? this.state.totalGifViewCount
+      : this.state.totalPhotoViewCount;
+    if (typeViews < MIN_VIEWS_FOR_AVERAGE) {
+      return this.getAverageWatchTimeMs();
+    }
+    return typeWatchMs / typeViews;
+  }
+
+  /**
    * Long-term score: how much time the user spent on this asset relative to
    * their average, summed across all views, with time decay.
    *
    * Positive → user spent MORE time than average (interest).
    * Negative → user spent LESS time than average (disinterest).
+   *
+   * During cold-start (few views) scores are dampened to avoid hallucinating
+   * preferences from noisy skip-rate variance.
    */
   private computeAssetScore(e: AssetEngagement, now: number): number {
     const decay = decayFactor(e.lastSeenAt, now);
-    const avgMs = this.getAverageWatchTimeMs();
+    // Use type-specific average so videos are compared against other videos
+    // and photos against other photos — prevents video watch-time inflation.
+    const avgMs = this.getTypeAverageWatchTimeMs(e.mediaType ?? 'photo');
     const relativeSec = (e.totalWatchTimeMs - avgMs * e.viewCount) / 1000;
     const raw = relativeSec * RELATIVE_TIME_SCORE_PER_SEC;
-    return raw * decay;
+    // Dampen scores during cold-start: ramp from 0.1 to 1.0 over MIN_VIEWS_FOR_AVERAGE views
+    const views = this.state.totalGlobalViewCount;
+    const coldDampen = views < MIN_VIEWS_FOR_AVERAGE
+      ? 0.1 + 0.9 * (views / MIN_VIEWS_FOR_AVERAGE)
+      : 1.0;
+    return raw * decay * coldDampen;
   }
 
   private computePersonScore(e: PersonEngagement, now: number): number {
@@ -272,7 +339,12 @@ class ForYouEngine {
     const avgMs = this.getAverageWatchTimeMs();
     const relativeSec = (e.totalWatchTimeMs - avgMs * e.viewCount) / 1000;
     const raw = relativeSec * RELATIVE_TIME_SCORE_PER_SEC;
-    return raw * decay;
+    // Dampen scores during cold-start (same as asset scores)
+    const views = this.state.totalGlobalViewCount;
+    const coldDampen = views < MIN_VIEWS_FOR_AVERAGE
+      ? 0.1 + 0.9 * (views / MIN_VIEWS_FOR_AVERAGE)
+      : 1.0;
+    return raw * decay * coldDampen;
   }
 
   // ── Session momentum ────────────────────────────────────────────────────
@@ -305,23 +377,31 @@ class ForYouEngine {
    * Combined score = long-term score + SESSION_MOMENTUM_WEIGHT × session score.
    * This is used for anchor selection so that recent session interests are
    * amplified without losing long-term preferences.
+   *
+   * When called in a loop (e.g. pickQueryAnchorAssetIds), pass a pre-computed
+   * momentum map to avoid recomputing it on every call.
    */
-  private getCombinedAssetScore(assetId: string, longTermScore: number): number {
-    const momentum = this.getSessionMomentumScores();
-    const sessionScore = momentum.get(assetId) ?? 0;
+  private getCombinedAssetScore(assetId: string, longTermScore: number, momentum?: Map<string, number>): number {
+    const m = momentum ?? this.getSessionMomentumScores();
+    const sessionScore = m.get(assetId) ?? 0;
     return longTermScore + SESSION_MOMENTUM_WEIGHT * sessionScore;
   }
 
   // ── Public API: record engagement ────────────────────────────────────────
 
   /**
-   * Record that the user viewed an asset for `watchTimeMs` milliseconds.
-   * The score is computed relative to the user's average watch time —
-   * there is no absolute "skip" threshold. Spending less time than average
-   * is a negative signal; spending more is positive.
-   * `personIds` are the face-cluster IDs detected in the asset.
+   * Record engagement. If `isRevisit` is true (user went back to this asset),
+   * only count the watch time if it exceeds MIN_REVISIT_WATCH_TIME_MS — this
+   * avoids polluting stats with brief navigation flashes.
    */
-  recordEngagement(assetId: string, watchTimeMs: number, personIds: string[]): void {
+  recordEngagement(assetId: string, watchTimeMs: number, personIds: string[], isRevisit: boolean = false, mediaType: ForYouMediaType = 'photo'): void {
+    if (isRevisit && watchTimeMs < MIN_REVISIT_WATCH_TIME_MS) {
+      fyLog(
+        `recordEngagement: SKIPPED revisit asset=${assetId.slice(0, 8)}… ` +
+        `watchTime=${(watchTimeMs / 1000).toFixed(1)}s < ${(MIN_REVISIT_WATCH_TIME_MS / 1000).toFixed(1)}s threshold`,
+      );
+      return;
+    }
     const now = Date.now();
     const avgMs = this.getAverageWatchTimeMs();
     const relativeSec = (watchTimeMs - avgMs) / 1000;
@@ -337,10 +417,23 @@ class ForYouEngine {
     this.state.totalGlobalWatchTimeMs += watchTimeMs;
     this.state.totalGlobalViewCount += 1;
 
+    // Update per-type running averages (to normalise video/gif/photo watch times)
+    if (mediaType === 'video') {
+      this.state.totalVideoWatchTimeMs += watchTimeMs;
+      this.state.totalVideoViewCount += 1;
+    } else if (mediaType === 'gif') {
+      this.state.totalGifWatchTimeMs += watchTimeMs;
+      this.state.totalGifViewCount += 1;
+    } else {
+      this.state.totalPhotoWatchTimeMs += watchTimeMs;
+      this.state.totalPhotoViewCount += 1;
+    }
+
     // Asset engagement
     const ae: AssetEngagement = this.state.assets[assetId] ?? {
-      totalWatchTimeMs: 0, viewCount: 0, lastSeenAt: now, score: 0,
+      totalWatchTimeMs: 0, viewCount: 0, lastSeenAt: now, score: 0, mediaType,
     };
+    ae.mediaType = mediaType;
     ae.totalWatchTimeMs += watchTimeMs;
     ae.viewCount += 1;
     ae.lastSeenAt = now;
@@ -404,9 +497,11 @@ class ForYouEngine {
    */
   pickQueryAnchorAssetIds(count: number = MULTI_ANCHOR_COUNT): Array<{ id: string; score: number }> {
     const now = Date.now();
+    // Pre-compute session momentum once to avoid O(n × sessionSize) recomputation
+    const momentum = this.getSessionMomentumScores();
     const entries = Object.entries(this.state.assets).map(([id, e]) => {
       const lt = this.computeAssetScore(e, now);
-      return { id, score: this.getCombinedAssetScore(id, lt) };
+      return { id, score: this.getCombinedAssetScore(id, lt, momentum) };
     });
     if (entries.length === 0) {
       fyLog('pickAnchors: no tracked assets', 'warn');
@@ -523,11 +618,27 @@ class ForYouEngine {
   }
 
   /**
+   * Return a recency penalty for an asset based on how recently it was shown.
+   * Assets shown very recently get a large penalty; the penalty decays as the
+   * asset moves further back in the recently-shown queue.
+   * Returns 0 if the asset is not in the recently-shown list.
+   */
+  getRecencyPenalty(assetId: string): number {
+    const idx = this.state.recentlyShown.indexOf(assetId);
+    if (idx === -1) return 0;
+    // idx 0 = most recent → strongest penalty; decays as idx grows.
+    // Penalty ranges from -20 (just shown) to ~-2 (near end of list).
+    const recency = 1 - idx / this.state.recentlyShown.length; // 1.0 → 0.0
+    return -(2 + 18 * recency);
+  }
+
+  /**
    * Score a candidate asset for ranking within CLIP search results.
    * Combines:
    *  - Person affinity: boost if the asset features people the user likes
    *  - Negative signal: penalise if the user previously disliked this exact asset
    *  - Freshness: slight boost for never-seen assets
+   *  - Recency penalty: strong penalty for recently-shown assets (decays with distance)
    *
    * Returns a score modifier (can be negative). Higher is better.
    */
@@ -535,6 +646,7 @@ class ForYouEngine {
     const now = Date.now();
     let score = 0;
     let personBoost = 0;
+    let interestBoost = 0;
     let dislikePenalty = 0;
     let freshnessBonus = 0;
 
@@ -548,13 +660,16 @@ class ForYouEngine {
     }
     score += personBoost;
 
-    // Penalise previously disliked assets
+    // Interest boost / dislike penalty based on prior engagement with this exact asset
     const ae = this.state.assets[assetId];
     if (ae) {
       const as_ = this.computeAssetScore(ae, now);
       if (as_ < 0) {
         dislikePenalty = as_ * 2; // strong penalty for disliked content
         score += dislikePenalty;
+      } else if (as_ > 0) {
+        interestBoost = as_ * 0.5; // mild boost for previously liked content
+        score += interestBoost;
       }
     }
 
@@ -564,10 +679,14 @@ class ForYouEngine {
       score += freshnessBonus;
     }
 
-    if (personBoost !== 0 || dislikePenalty !== 0) {
+    // Recency penalty — strongly deprioritise assets shown in the near past
+    const recencyPenalty = this.getRecencyPenalty(assetId);
+    score += recencyPenalty;
+
+    if (personBoost !== 0 || dislikePenalty !== 0 || interestBoost !== 0 || recencyPenalty !== 0) {
       fyLog(
         `scoreCandidate ${assetId.slice(0, 8)}…: ` +
-        `person=${personBoost.toFixed(2)} dislike=${dislikePenalty.toFixed(2)} fresh=${freshnessBonus} → ${score.toFixed(2)}`,
+        `person=${personBoost.toFixed(2)} interest=${interestBoost.toFixed(2)} dislike=${dislikePenalty.toFixed(2)} fresh=${freshnessBonus} recency=${recencyPenalty.toFixed(1)} → ${score.toFixed(2)}`,
       );
     }
 
@@ -635,14 +754,18 @@ class ForYouEngine {
     const recentCount = Math.max(2, Math.floor(this.sessionRing.length / 3));
     const recent = this.sessionRing.slice(-recentCount);
     const older = this.sessionRing.slice(0, -recentCount);
-    const avgRecent = recent.reduce((s, r) => s + r.watchTimeMs, 0) / recent.length;
-    const avgOlder = older.reduce((s, r) => s + r.watchTimeMs, 0) / older.length;
-    // A burst is detected when recent watch time is >1.8× the older average
+    // Normalise watch times relative to the global average so that videos
+    // don't artificially inflate the burst ratio.
+    const avgMs = this.getAverageWatchTimeMs();
+    const normalise = (ms: number) => avgMs > 0 ? ms / avgMs : ms;
+    const avgRecent = recent.reduce((s, r) => s + normalise(r.watchTimeMs), 0) / recent.length;
+    const avgOlder = older.reduce((s, r) => s + normalise(r.watchTimeMs), 0) / older.length;
+    // A burst is detected when recent normalised watch time is >1.8× the older average
     const ratio = avgOlder > 0 ? avgRecent / avgOlder : 0;
     const burst = avgOlder > 0 && ratio > 1.8;
     fyLog(
       `interestBurst: sessionSize=${this.sessionRing.length} ` +
-      `recentAvg=${(avgRecent / 1000).toFixed(1)}s olderAvg=${(avgOlder / 1000).toFixed(1)}s ` +
+      `recentAvg=${avgRecent.toFixed(2)} olderAvg=${avgOlder.toFixed(2)} ` +
       `ratio=${ratio.toFixed(2)} → burst=${burst}`,
     );
     return burst;
@@ -651,15 +774,19 @@ class ForYouEngine {
   /** Get a snapshot of the engine's internal state for the debug overlay. */
   getDebugState() {
     const now = Date.now();
-    const assetEntries = Object.entries(this.state.assets).map(([id, e]) => ({
-      id: id.slice(0, 8),
-      fullId: id,
-      score: this.computeAssetScore(e, now),
-      combined: this.getCombinedAssetScore(id, this.computeAssetScore(e, now)),
-      views: e.viewCount,
-      totalWatchSec: +(e.totalWatchTimeMs / 1000).toFixed(1),
-      lastSeenAgo: `${((now - e.lastSeenAt) / 60_000).toFixed(0)}m`,
-    }));
+    const momentum = this.getSessionMomentumScores();
+    const assetEntries = Object.entries(this.state.assets).map(([id, e]) => {
+      const score = this.computeAssetScore(e, now);
+      return {
+        id: id.slice(0, 8),
+        fullId: id,
+        score,
+        combined: this.getCombinedAssetScore(id, score, momentum),
+        views: e.viewCount,
+        totalWatchSec: +(e.totalWatchTimeMs / 1000).toFixed(1),
+        lastSeenAgo: `${((now - e.lastSeenAt) / 60_000).toFixed(0)}m`,
+      };
+    });
     assetEntries.sort((a, b) => b.combined - a.combined);
 
     const personEntries = Object.entries(this.state.persons).map(([id, e]) => ({
@@ -684,9 +811,26 @@ class ForYouEngine {
     };
   }
 
-  /** Remove a single tracked asset from engagement data. */
+  /** Remove a single tracked asset from engagement data, adjusting running totals. */
   removeAsset(assetId: string): void {
-    delete this.state.assets[assetId];
+    const ae = this.state.assets[assetId];
+    if (ae) {
+      // Subtract from running totals (same logic as eviction) to prevent average drift
+      this.state.totalGlobalWatchTimeMs = Math.max(0, this.state.totalGlobalWatchTimeMs - ae.totalWatchTimeMs);
+      this.state.totalGlobalViewCount = Math.max(0, this.state.totalGlobalViewCount - ae.viewCount);
+      const mt = ae.mediaType ?? 'photo';
+      if (mt === 'video') {
+        this.state.totalVideoWatchTimeMs = Math.max(0, this.state.totalVideoWatchTimeMs - ae.totalWatchTimeMs);
+        this.state.totalVideoViewCount = Math.max(0, this.state.totalVideoViewCount - ae.viewCount);
+      } else if (mt === 'gif') {
+        this.state.totalGifWatchTimeMs = Math.max(0, this.state.totalGifWatchTimeMs - ae.totalWatchTimeMs);
+        this.state.totalGifViewCount = Math.max(0, this.state.totalGifViewCount - ae.viewCount);
+      } else {
+        this.state.totalPhotoWatchTimeMs = Math.max(0, this.state.totalPhotoWatchTimeMs - ae.totalWatchTimeMs);
+        this.state.totalPhotoViewCount = Math.max(0, this.state.totalPhotoViewCount - ae.viewCount);
+      }
+      delete this.state.assets[assetId];
+    }
     this.state.recentlyShown = this.state.recentlyShown.filter((id) => id !== assetId);
     this.save();
     fyLog(`removeAsset: removed ${assetId.slice(0, 8)}`, 'info');

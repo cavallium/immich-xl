@@ -45,7 +45,7 @@ function createSlideshowStore() {
   const forYouOnlyVideos = persisted<boolean>('slideshow-foryou-only-videos', false, {});
   const forYouOnlyFavorites = persisted<boolean>('slideshow-foryou-only-favorites', false, {});
   const forYouMinRating = persisted<number>('slideshow-foryou-min-rating', 0, {}); // 0 = no filter, 1-5 = minimum rating
-  const forYouDiscoveryRate = persisted<number>('slideshow-foryou-discovery-rate', 10, {}); // % chance of discovery mode (0-100)
+  const forYouDiscoveryRate = persisted<number>('slideshow-foryou-discovery-rate', 30, {}); // % chance of discovery mode (0-100)
   const forYouAvoidRecent = persisted<boolean>('slideshow-foryou-avoid-recent', true, {}); // Avoid showing recently viewed
 
   return {

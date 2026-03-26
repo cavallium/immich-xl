@@ -17,7 +17,7 @@
   import { ocrManager } from '$lib/stores/ocr.svelte';
   import { alwaysLoadOriginalVideo, isShowDetail } from '$lib/stores/preferences.store';
   import { SlideshowNavigation, SlideshowState, slideshowStore } from '$lib/stores/slideshow.store';
-  import { forYouEngine, getForYouDebugLog, clearForYouDebugLog, type ForYouLogEntry, type ForYouLogLevel } from '$lib/stores/for-you-engine';
+  import { forYouEngine, getForYouDebugLog, clearForYouDebugLog, type ForYouLogEntry, type ForYouLogLevel, type ForYouMediaType } from '$lib/stores/for-you-engine';
   import { user } from '$lib/stores/user.store';
   import { websocketEvents } from '$lib/stores/websocket';
   import { getAssetJobMessage, getAssetThumbnailUrl, getSharedLink, handlePromiseError } from '$lib/utils';
@@ -110,6 +110,8 @@
   // For You algorithm state — only need to track when the current asset started being viewed;
   // all engagement data is persisted in the ForYouEngine (localStorage).
   let currentAssetStartTime: number = $state(0);
+  // Whether the currently displayed asset is a revisit (user went back).
+  let isCurrentAssetRevisit = false;
   // Prefetch queue: pre-fetched next assets for instant ForYou transitions.
   let forYouPrefetchQueue: AssetResponseDto[] = [];
   // Whether a prefetch is currently in-flight (avoid duplicate fetches).
@@ -317,37 +319,49 @@
     return params;
   };
 
-  /** Pick the best candidate from a list, filtering recently-shown and negatively-scored assets,
-   *  then re-ranking by person affinity and engagement signals. */
+  /**
+   * Pick the best candidate from a list, filtering recently-shown and
+   * negatively-scored assets, then re-ranking by person affinity, engagement
+   * signals, and original CLIP similarity rank.
+   *
+   * The `assets` array is expected to be ordered by CLIP similarity (index 0 =
+   * most similar). We preserve each asset's original index so the CLIP rank
+   * bonus remains meaningful even after filtering.
+   */
   const pickCandidate = (assets: AssetResponseDto[], negativeIds?: Set<string>): AssetResponseDto | null => {
     if (!assets || assets.length === 0) {
       fyLog('[pick] no candidates to pick from', 'warn');
       return null;
     }
-    let pool = assets;
+    // Tag each asset with its original CLIP rank before any filtering
+    const originalSize = assets.length;
+    let pool = assets.map((a, i) => ({ asset: a, originalIdx: i }));
     // Filter out negatively-scored assets (content the user dislikes)
     if (negativeIds && negativeIds.size > 0) {
       const before = pool.length;
-      const filtered = pool.filter((a) => !negativeIds.has(a.id));
+      const filtered = pool.filter((p) => !negativeIds.has(p.asset.id));
       if (filtered.length > 0) pool = filtered;
       fyLog(`[pick] negative content filter: ${before} → ${pool.length} candidates`);
     }
     if ($forYouAvoidRecent) {
       const before = pool.length;
-      const fresh = pool.filter((a) => !forYouEngine.isRecentlyShown(a.id));
-      if (fresh.length > 0) pool = fresh;
+      const fresh = pool.filter((p) => !forYouEngine.isRecentlyShown(p.asset.id));
+      if (fresh.length > 0) {
+        pool = fresh;
+      } else {
+        fyLog(`[pick] WARNING: all ${before} candidates were recently shown — recency penalty will deprioritise them`, 'warn');
+      }
       fyLog(`[pick] recently-shown filter: ${before} → ${pool.length} candidates`);
     }
-    // Re-rank candidates using person affinity, negative history, and freshness.
-    // The CLIP search order provides a base relevance rank (index-based),
-    // which we combine with the engine's candidate score.
-    const scored = pool.map((a, idx) => {
+    // Re-rank candidates using person affinity, negative history, freshness,
+    // and the original CLIP similarity rank (preserved through filtering).
+    const scored = pool.map(({ asset: a, originalIdx }) => {
       const personIds = (a.people ?? []).filter((p) => p.id).map((p) => p.id);
       const candidateScore = forYouEngine.scoreCandidateAsset(a.id, personIds);
-      // Base rank score: earlier CLIP results get a strong exponential bonus.
-      // CLIP similarity drops off quickly, so we use exponential decay to
-      // heavily favour the top results and suppress the irrelevant tail.
-      const clipRankBonus = 5 * Math.exp(-3 * idx / pool.length);
+      // Base rank score: earlier CLIP results get a mild bonus.
+      // Uses the *original* index (not post-filter) so filtering doesn't
+      // scramble the similarity ordering.
+      const clipRankBonus = 3 * Math.exp(-1.2 * originalIdx / originalSize);
       return { asset: a, candidateScore, clipRankBonus, finalScore: candidateScore + clipRankBonus };
     });
     scored.sort((a, b) => b.finalScore - a.finalScore);
@@ -664,9 +678,8 @@
         selectedAsset = await fetchRandomAsset();
       }
 
-      if (selectedAsset) {
-        forYouEngine.addRecentlyShown(selectedAsset.id);
-      }
+      // Don't mark as recently shown here — the caller (getForYouAssetFast or getForYouAsset)
+      // is responsible for marking when the asset is actually served to the user.
       return selectedAsset;
     } catch {
       return null;
@@ -696,8 +709,12 @@
     if (currentAssetStartTime === 0) return;
     const watchTimeMs = Date.now() - currentAssetStartTime;
     const personIds = (viewedAsset.people ?? []).filter((p) => p.id).map((p) => p.id);
-    forYouEngine.recordEngagement(viewedAsset.id, watchTimeMs, personIds);
+    const mediaType: ForYouMediaType = viewedAsset.type === AssetTypeEnum.Video
+      ? 'video'
+      : (viewedAsset.originalMimeType?.toLowerCase().includes('gif') ? 'gif' : 'photo');
+    forYouEngine.recordEngagement(viewedAsset.id, watchTimeMs, personIds, isCurrentAssetRevisit, mediaType);
     currentAssetStartTime = Date.now();
+    isCurrentAssetRevisit = false;
   };
 
   const navigateAsset = async (order?: 'previous' | 'next', e?: Event) => {
@@ -718,8 +735,10 @@
       recordWatchTime(asset);
 
       if (order === 'previous') {
+        isCurrentAssetRevisit = true;
         hasNext = slideshowHistory.previous();
       } else {
+        isCurrentAssetRevisit = false;
         hasNext = slideshowHistory.next();
         if (!hasNext) {
           const newAsset = await getLibraryRandomAsset();
@@ -737,8 +756,10 @@
       recordWatchTime(asset);
 
       if (order === 'previous') {
+        isCurrentAssetRevisit = true;
         hasNext = slideshowHistory.previous();
       } else {
+        isCurrentAssetRevisit = false;
         hasNext = slideshowHistory.next();
         if (!hasNext) {
           const newAsset = await getForYouAssetFast();
