@@ -336,7 +336,14 @@ class ForYouEngine {
     const coldDampen = views < MIN_VIEWS_FOR_AVERAGE
       ? 0.1 + 0.9 * (views / MIN_VIEWS_FOR_AVERAGE)
       : 1.0;
-    return raw * decay * coldDampen;
+    let score = raw * decay * coldDampen;
+    // Include the like boost so that liked assets are treated as strongly
+    // positive everywhere (anchor selection, negative-anchor exclusion,
+    // hasEngagementData, etc.) — not just in scoreCandidateAsset.
+    if (e.liked) {
+      score += LIKE_BOOST;
+    }
+    return score;
   }
 
   private computePersonScore(e: PersonEngagement, now: number): number {
@@ -695,6 +702,8 @@ class ForYouEngine {
     score += personBoost;
 
     // Interest boost / dislike penalty based on prior engagement with this exact asset
+    // Note: computeAssetScore already includes LIKE_BOOST for liked assets,
+    // so we don't add it separately here.
     const ae = this.state.assets[assetId];
     if (ae) {
       const as_ = this.computeAssetScore(ae, now);
@@ -704,11 +713,6 @@ class ForYouEngine {
       } else if (as_ > 0) {
         interestBoost = as_ * 0.5; // mild boost for previously liked content
         score += interestBoost;
-      }
-      // Strong boost for explicitly liked (hearted) assets
-      if (ae.liked) {
-        interestBoost += LIKE_BOOST;
-        score += LIKE_BOOST;
       }
     }
 

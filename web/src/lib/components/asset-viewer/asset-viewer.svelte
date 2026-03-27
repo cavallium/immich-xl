@@ -703,8 +703,28 @@
 
       let selectedAsset: AssetResponseDto | null = null;
 
+      // ── Build content-based negative exclusion set (same as getForYouAsset) ──
+      const negativeAnchorIds = forYouEngine.pickNegativeAnchorAssetIds();
+      let negativeContentIds = new Set<string>();
+      if (isSmartSearchEnabled && negativeAnchorIds.length > 0) {
+        const negResults = await Promise.all(negativeAnchorIds.map(async (anchorId) => {
+          try {
+            const response = await searchSmart({
+              smartSearchDto: {
+                queryAssetId: anchorId,
+                size: 15,
+                ...buildFilterParams(),
+              } as Parameters<typeof searchSmart>[0]['smartSearchDto'],
+            });
+            return response.assets.items.map((a) => a.id);
+          } catch { return []; }
+        }));
+        negativeContentIds = new Set(negResults.flat());
+        for (const id of negativeAnchorIds) negativeContentIds.add(id);
+      }
+
       if (useDiscovery) {
-        selectedAsset = await fetchRandomAsset();
+        selectedAsset = await fetchRandomAsset(negativeContentIds);
       }
 
       if (!selectedAsset && !useDiscovery && isSmartSearchEnabled && forYouEngine.hasEngagementData()) {
@@ -742,7 +762,7 @@
               }
             }
           }
-          selectedAsset = pickCandidate(allCandidates);
+          selectedAsset = pickCandidate(allCandidates, negativeContentIds);
           if (selectedAsset) {
             strategy = `CLIP (${anchors.length} anchors)`;
           }
@@ -761,7 +781,7 @@
                 ...buildFilterParams(),
               } as Parameters<typeof searchRandom>[0]['randomSearchDto'],
             });
-            selectedAsset = pickCandidate(assets);
+            selectedAsset = pickCandidate(assets, negativeContentIds);
             if (selectedAsset) {
               strategy = 'PERSON';
             }
@@ -770,7 +790,7 @@
       }
 
       if (!selectedAsset) {
-        selectedAsset = await fetchRandomAsset();
+        selectedAsset = await fetchRandomAsset(negativeContentIds);
         strategy = 'RANDOM (fallback)';
       }
 
