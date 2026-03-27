@@ -450,8 +450,33 @@ export class MediaService extends BaseService {
       format,
     );
 
-    await this.mediaRepository.transcode(asset.originalPath, previewPath, previewOptions);
-    await this.mediaRepository.transcode(asset.originalPath, thumbnailPath, thumbnailOptions);
+    // ffmpeg does not support encoding to JXL, so extract frames as PNG first, then convert with sharp
+    const needsSharpConversion = (fmt: ImageFormat) =>
+      fmt === ImageFormat.Jxl || fmt === ImageFormat.JxlJpeg;
+
+    const previewNeedsConversion = needsSharpConversion(image.preview.format);
+    const thumbnailNeedsConversion = needsSharpConversion(image.thumbnail.format);
+
+    const previewFfmpegPath = previewNeedsConversion ? `${previewPath}.tmp.png` : previewPath;
+    const thumbnailFfmpegPath = thumbnailNeedsConversion ? `${thumbnailPath}.tmp.png` : thumbnailPath;
+
+    await this.mediaRepository.transcode(asset.originalPath, previewFfmpegPath, previewOptions);
+    await this.mediaRepository.transcode(asset.originalPath, thumbnailFfmpegPath, thumbnailOptions);
+
+    const thumbnailOptions_ = {
+      colorspace: image.colorspace,
+      processInvalidImages: false as const,
+    };
+
+    if (previewNeedsConversion) {
+      await this.mediaRepository.generateThumbnail(previewFfmpegPath, { ...image.preview, ...thumbnailOptions_ }, previewPath);
+      await this.storageRepository.unlink(previewFfmpegPath);
+    }
+
+    if (thumbnailNeedsConversion) {
+      await this.mediaRepository.generateThumbnail(thumbnailFfmpegPath, { ...image.thumbnail, ...thumbnailOptions_ }, thumbnailPath);
+      await this.storageRepository.unlink(thumbnailFfmpegPath);
+    }
 
     const thumbhash = await this.mediaRepository.generateThumbhash(previewPath, {
       colorspace: image.colorspace,
