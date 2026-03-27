@@ -115,7 +115,7 @@
   // Whether the currently displayed asset is a revisit (user went back).
   let isCurrentAssetRevisit = false;
   // Prefetch queue: pre-fetched next assets for instant ForYou transitions.
-  let forYouPrefetchQueue: AssetResponseDto[] = [];
+  let forYouPrefetchQueue: { asset: AssetResponseDto; strategy: string }[] = [];
   // Whether a prefetch is currently in-flight (avoid duplicate fetches).
   let forYouPrefetching = false;
   // Debug overlay state
@@ -653,13 +653,14 @@
     if (forYouPrefetchQueue.length > 0) {
       const prefetched = forYouPrefetchQueue.shift()!;
       // Verify it's still fresh (not recently shown by another path)
-      if (!forYouEngine.isRecentlyShown(prefetched.id) || !$forYouAvoidRecent) {
-        fyLog(`[prefetch] serving prefetched asset ${prefetched.id.slice(0, 8)}… (queue=${forYouPrefetchQueue.length} remaining)`);
-        forYouEngine.addRecentlyShown(prefetched.id);
+      if (!forYouEngine.isRecentlyShown(prefetched.asset.id) || !$forYouAvoidRecent) {
+        forYouLastStrategy = prefetched.strategy;
+        fyLog(`[prefetch] serving prefetched asset ${prefetched.asset.id.slice(0, 8)}… strategy=${prefetched.strategy} (queue=${forYouPrefetchQueue.length} remaining)`);
+        forYouEngine.addRecentlyShown(prefetched.asset.id);
         triggerForYouPrefetch();
-        return prefetched;
+        return prefetched.asset;
       }
-      fyLog(`[prefetch] prefetched asset ${prefetched.id.slice(0, 8)}… was already shown, falling back to fresh fetch`);
+      fyLog(`[prefetch] prefetched asset ${prefetched.asset.id.slice(0, 8)}… was already shown, falling back to fresh fetch`);
     }
     return getForYouAsset();
   };
@@ -669,15 +670,15 @@
     if (forYouPrefetching || forYouPrefetchQueue.length >= 2) return;
     forYouPrefetching = true;
     getForYouAssetInternal()
-      .then((a) => {
-        if (a) forYouPrefetchQueue.push(a);
+      .then((result) => {
+        if (result) forYouPrefetchQueue.push(result);
       })
       .catch(() => { /* prefetch failure is non-critical */ })
       .finally(() => { forYouPrefetching = false; });
   };
 
   /** Internal version of getForYouAsset that doesn't trigger further prefetch (avoids recursion). */
-  const getForYouAssetInternal = async (): Promise<AssetResponseDto | null> => {
+  const getForYouAssetInternal = async (): Promise<{ asset: AssetResponseDto; strategy: string } | null> => {
     try {
       const userDiscoveryRate = $forYouDiscoveryRate / 100;
       const effectiveDiscoveryRate = forYouEngine.getAdaptiveDiscoveryRate(userDiscoveryRate);
@@ -685,6 +686,8 @@
       const useDiscovery = forYouEngine.hasInterestBurst()
         ? roll < effectiveDiscoveryRate * 0.3
         : roll < effectiveDiscoveryRate;
+
+      let strategy = useDiscovery ? 'DISCOVERY' : 'RECOMMENDATION';
 
       let isSmartSearchEnabled = false;
       try {
@@ -740,6 +743,9 @@
             }
           }
           selectedAsset = pickCandidate(allCandidates);
+          if (selectedAsset) {
+            strategy = `CLIP (${anchors.length} anchors)`;
+          }
         }
       }
 
@@ -756,17 +762,25 @@
               } as Parameters<typeof searchRandom>[0]['randomSearchDto'],
             });
             selectedAsset = pickCandidate(assets);
+            if (selectedAsset) {
+              strategy = 'PERSON';
+            }
           } catch { /* ignore */ }
         }
       }
 
       if (!selectedAsset) {
         selectedAsset = await fetchRandomAsset();
+        strategy = 'RANDOM (fallback)';
+      }
+
+      if (!selectedAsset) {
+        return null;
       }
 
       // Don't mark as recently shown here — the caller (getForYouAssetFast or getForYouAsset)
       // is responsible for marking when the asset is actually served to the user.
-      return selectedAsset;
+      return { asset: selectedAsset, strategy };
     } catch {
       return null;
     }
